@@ -1,0 +1,69 @@
+[project]
+name = "donkit-guard"
+version = "0.0.1"
+description = "Open-source guard for LLM traffic and AI-agent actions: secrets/PII checks before the model, policy checks before tool execution, approvals and audit."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Donkit AI", email = "opensource@donkit.ai" }]
+requires-python = ">=3.12,<3.14"
+keywords = ["llm", "security", "guardrails", "pii", "secrets", "mcp", "agents", "policy"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Typing :: Typed",
+]
+dependencies = [
+  "pydantic>=2.7,<3",
+  "pyyaml>=6.0,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/donkit-ai/donkit-guard"
+Repository = "https://github.com/donkit-ai/donkit-guard"
+Issues = "https://github.com/donkit-ai/donkit-guard/issues"
+Changelog = "https://github.com/donkit-ai/donkit-guard/blob/main/CHANGELOG.md"
+Security = "https://github.com/donkit-ai/donkit-guard/security/policy"
+
+[tool.poetry]
+packages = [{ include = "donkit_guard", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.1"
+pytest-asyncio = "^1.4"
+ruff = "^0.16"
+mypy = "^2.3"
+types-pyyaml = "^6.0"
+pip-licenses = "^5.5"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "TID", "TC", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["donkit_guard"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"

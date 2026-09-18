@@ -1,0 +1,20 @@
+name: Feature request
+description: A new detector, policy capability, integration or deployment option
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cannot be expressed or enforced today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [policy core, detectors, approvals, audit, embedded integration, standalone gateway, docs]

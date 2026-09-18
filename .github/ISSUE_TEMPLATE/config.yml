@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/donkit-ai/donkit-guard/security/advisories/new
+    about: Private reporting channel. Please do not file vulnerabilities as public issues.

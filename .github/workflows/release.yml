@@ -1,0 +1,126 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Check that the tag matches pyproject version
+        id: meta
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(poetry version --short)"
+          if [ "$tag" != "$ver" ]; then echo "tag v$tag does not match pyproject version $ver" >&2; exit 1; fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+      - name: Build sdist and wheel
+        run: poetry build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  sbom:
+    name: sbom
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: sbom-${{ needs.build.outputs.version }}.cdx.json
+
+  pypi:
+    name: publish to PyPI
+    # Enabled by setting the repository variable PYPI_TRUSTED_PUBLISHER=configured once the
+    # pending publisher for donkit-guard exists on pypi.org (owner donkit-ai, workflow release.yml, environment pypi).
+    if: vars.PYPI_TRUSTED_PUBLISHER == 'configured'
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/donkit-guard/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Publish (trusted publishing, no API token)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  images:
+    name: build & push images
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image:
+          - { name: guard, dockerfile: docker/Dockerfile.standalone }
+          - { name: guard-pii, dockerfile: docker/Dockerfile.pii }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Skip when the Dockerfile does not exist yet
+        id: present
+        run: |
+          if [ -f "${{ matrix.image.dockerfile }}" ]; then echo "build=true" >> "$GITHUB_OUTPUT"; else echo "build=false" >> "$GITHUB_OUTPUT"; echo "::notice::${{ matrix.image.dockerfile }} not present, skipping ${{ matrix.image.name }}"; fi
+      - uses: docker/setup-buildx-action@v4
+        if: steps.present.outputs.build == 'true'
+      - uses: docker/login-action@v4
+        if: steps.present.outputs.build == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        if: steps.present.outputs.build == 'true'
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/donkit-ai/${{ matrix.image.name }}:${{ needs.build.outputs.version }}
+            ghcr.io/donkit-ai/${{ matrix.image.name }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/donkit-ai/donkit-guard
+            org.opencontainers.image.version=${{ needs.build.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+  github-release:
+    name: GitHub release
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+      - name: Create release with generated notes and attached artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in *a*|*b*|*rc*) prerelease="--prerelease";; esac
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --generate-notes $prerelease artifacts/dist/* artifacts/sbom-*/*

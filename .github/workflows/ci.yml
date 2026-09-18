@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Install
+        run: poetry install --no-interaction
+      - name: Ruff (lint)
+        run: poetry run ruff check .
+      - name: Ruff (format)
+        run: poetry run ruff format --check .
+      - name: Mypy
+        run: poetry run mypy
+
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Install
+        run: poetry install --no-interaction
+      - name: Pytest
+        run: poetry run pytest
+
+  licenses:
+    name: dependency licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Install (runtime deps only)
+        run: poetry install --no-interaction --only main
+      - name: Fail on copyleft licenses in the runtime tree
+        run: |
+          poetry run pip install pip-licenses >/dev/null
+          poetry run pip-licenses --format=markdown --with-urls --order=license > licenses.md
+          poetry run pip-licenses --fail-on="GPL;GPLv2;GPLv3;AGPL;AGPLv3;LGPL;LGPLv2;LGPLv3;SSPL;EUPL"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: licenses
+          path: licenses.md
+
+  sbom:
+    name: sbom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: sbom-source.cdx.json
+
+  ci:
+    name: ci
+    needs: [lint, test, licenses, sbom]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: All required jobs passed
+        run: |
+          echo '${{ toJSON(needs) }}' | python3 -c 'import json,sys; r=json.load(sys.stdin); bad=[k for k,v in r.items() if v["result"]!="success"]; print("failed:", bad) if bad else print("ok"); sys.exit(1 if bad else 0)'

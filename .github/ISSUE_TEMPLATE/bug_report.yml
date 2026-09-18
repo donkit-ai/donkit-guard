@@ -1,0 +1,29 @@
+name: Bug report
+description: Something behaves differently from the documentation
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: donkit-guard version or commit, and the deployment mode (embedded / standalone)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the decision explanation from the audit record if there is one. Do not paste real secrets or personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Policy snippet, request or tool call, and the observed decision.
