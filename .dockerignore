@@ -1,0 +1,16 @@
+# The images copy only what they need from services/; everything else is build context
+# that would be uploaded to the daemon on every build.
+.git
+.github/
+.venv
+dist/
+build/
+docs/
+tests/
+examples/
+.*_cache
+.coverage
+htmlcov/
+**/__pycache__
+**/*.py[cod]
+*.egg-info/

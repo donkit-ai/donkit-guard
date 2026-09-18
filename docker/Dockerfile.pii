@@ -1,0 +1,41 @@
+# guard-pii: Presidio analyzer with spaCy ru/en models and the Russian recognizer set.
+# Models are installed from the explosion/spacy-models release wheels at build time;
+# nothing is downloaded at runtime.
+FROM python:3.12-slim
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TLDEXTRACT_CACHE=/opt/tldextract-cache \
+    TLDEXTRACT_CACHE_TIMEOUT=1 \
+    PII_PORT=8080
+
+WORKDIR /app
+
+COPY services/pii/requirements.txt /app/services/pii/requirements.txt
+RUN pip install -r /app/services/pii/requirements.txt
+
+# Warm the Public Suffix List cache: the e-mail recognizer calls tldextract, which
+# otherwise contacts publicsuffix.org on the first e-mail seen at runtime.
+RUN python -c "import tldextract; print(tldextract.extract('user@example.ru'))" \
+    && chmod -R a+r /opt/tldextract-cache
+
+COPY services/pii/*.py /app/services/pii/
+RUN touch /app/services/__init__.py /app/services/pii/__init__.py
+
+# Fail the build if the models cannot be loaded offline.
+RUN python -c "import spacy; spacy.load('ru_core_news_lg'); spacy.load('en_core_web_lg')"
+
+# The service parses attacker-influenced text through spaCy, Presidio and a large regex
+# set; nothing it needs is written at runtime, so it runs unprivileged.
+RUN useradd -r -u 10001 guard \
+    && chown -R guard /app /opt/tldextract-cache
+USER guard
+
+EXPOSE 8080
+# The probe follows PII_PORT so an image started on another port is not marked unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import os,urllib.request,sys; port=os.environ.get('PII_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=4).status == 200 else 1)"
+
+CMD ["python", "-m", "services.pii.app"]

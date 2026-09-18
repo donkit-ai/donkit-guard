@@ -3,6 +3,15 @@ Copyright 2026 Donkit AI
 
 This product includes software developed at Donkit AI (https://donkit.ai).
 
-Third-party components are listed with their licenses in THIRD_PARTY_NOTICES.md
-once they are added as dependencies; the software bill of materials for each
-release is attached to the corresponding GitHub Release.
+This product includes the gitleaks secret-detection rule set
+(src/donkit_guard/detectors/data/gitleaks.toml), Copyright (c) 2019 Zachary Rice,
+licensed under the MIT License. A copy of that licence is distributed with the
+data file as src/donkit_guard/detectors/data/LICENSE.gitleaks.
+
+This product includes seven regular expressions derived from detect-secrets
+(src/donkit_guard/detectors/data/extra_patterns.json), Copyright Yelp, Inc.,
+licensed under the Apache License, Version 2.0.
+
+The complete list of third-party components, including those present only in the
+container images, is in THIRD_PARTY_NOTICES.md; the software bill of materials for
+each release is attached to the corresponding GitHub Release.

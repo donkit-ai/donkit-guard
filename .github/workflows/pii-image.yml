@@ -1,0 +1,90 @@
+# Builds guard-pii and exercises it over its HTTP contract with no network namespace.
+# Path-filtered, so it does not run on every pull request and must stay out of the
+# required checks: a check that never starts blocks a merge.
+name: pii-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/pii/**"
+      - "docker/Dockerfile.pii"
+      - "tests/pii_service/**"
+      - ".github/workflows/pii-image.yml"
+  pull_request:
+    paths:
+      - "services/pii/**"
+      - "docker/Dockerfile.pii"
+      - "tests/pii_service/**"
+      - ".github/workflows/pii-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pii-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: build & probe guard-pii
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile.pii
+          push: false
+          load: true
+          tags: guard-pii:ci
+      # No network namespace at all: a runtime download would fail instead of passing quietly.
+      - name: Start the container without a network
+        run: docker run -d --name guard-pii --network none guard-pii:ci
+      - name: Wait for /healthz
+        run: |
+          for attempt in $(seq 1 60); do
+            if docker exec guard-pii python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4).status == 200 else 1)" 2>/dev/null; then
+              echo "healthy after ${attempt} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs guard-pii
+          exit 1
+      - name: Analyze a Russian and an English segment
+        run: |
+          docker exec -i guard-pii python - <<'PY'
+          import json
+          import urllib.request
+
+          body = json.dumps(
+              {
+                  "segments": [
+                      {"id": "ru", "text": "Иванов Пётр Сергеевич, СНИЛС 112-233-445 95", "lang": "ru"},
+                      {"id": "en", "text": "Write to John Smith at john.smith@example.com", "lang": "en"},
+                  ],
+                  "deadline_ms": 30000,
+              }
+          ).encode()
+          request = urllib.request.Request(
+              "http://127.0.0.1:8080/v1/analyze",
+              data=body,
+              headers={"Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              payload = json.load(response)
+          print(json.dumps(payload, ensure_ascii=False, indent=2))
+          assert payload["failed"] is False, payload
+          assert payload["spans"], payload
+          assert {span["segment_id"] for span in payload["spans"]} == {"ru", "en"}, payload
+          PY
+      - name: Container log
+        if: always()
+        run: docker logs guard-pii || true
+      - name: Stop the container
+        if: always()
+        run: docker rm -f guard-pii || true
