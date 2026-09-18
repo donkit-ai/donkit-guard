@@ -1,0 +1,30 @@
+schema_version: 1
+version: "example-strict-1"
+mode: enforce
+unsupported_content: deny
+approval_ttl_s: 300
+segment_limit_bytes: 262144
+layers:
+  - name: tenant
+    rules:
+      - id: pii-hard-deny-outside-platform
+        match:
+          action_kind: [llm_request]
+          finding_class: [pii]
+          destination_trust: [tenant, unknown]
+        action: deny
+        hard: true
+        reason: "Personal data may only be sent to platform-trusted destinations"
+      - id: execute-requires-approval
+        match:
+          action_kind: [tool_call]
+          effect: [execute]
+        action: require_approval
+        reason: "Code execution requires a human decision in the strict profile"
+      - id: untrusted-content-gates-writes
+        match:
+          action_kind: [tool_call]
+          effect: [write, egress, spend]
+          untrusted_content_seen: true
+        action: require_approval
+        reason: "A document or tool result entered the context; side effects need confirmation"

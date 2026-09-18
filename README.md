@@ -15,7 +15,7 @@ Two deployment modes share one policy core, so behaviour never diverges:
 
 ## Status
 
-Pre-alpha. The repository is being bootstrapped; see [CHANGELOG.md](CHANGELOG.md) and the milestones in the [roadmap issue](https://github.com/donkit-ai/donkit-guard/issues) for what lands when. Nothing here is production-ready yet.
+Alpha, core under construction. The first tagged pre-release (`v0.1.0a1`) contains the policy engine, the segment payload model, the secrets, checksum-PII, NER-PII and injection detectors, masking, asynchronous approvals, audit models and the in-memory adapters, plus the `guard-pii` service image. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What it will provide
 
@@ -23,9 +23,9 @@ Pre-alpha. The repository is being bootstrapped; see [CHANGELOG.md](CHANGELOG.md
 | --- | --- |
 | Data classes | Per class: allow, block, mask, require approval, or route to an administrator-approved model. Masking keeps JSON and tool schemas valid and never changes the meaning of a business operation; when a safe transformation is impossible the call is blocked. |
 | Prompt injection | Detection of suspicious instructions in user messages, documents, retrieval context and tool results, kept separate from enforcement: untrusted content can never widen an agent's permissions or stand in for a user's confirmation. |
-| Tool control | Mandatory check below the agent logic, before execution. Explicit deny wins; a protected action without a matching allow is denied. Sub-agents inherit no extra rights from delegation. |
+| Tool control | Mandatory check below the agent logic, before execution. Explicit deny wins; a protected action without a matching allow is denied. Sub-agents inherit no extra rights from delegation. A risk class declared by the tool provider itself never lowers the gate. |
 | Approvals | Dangerous operations pause *before* the side effect. An approval is bound to the action, the principal, the tenant (when there is one) and the policy version, expires, and cannot be replayed; changed arguments require a new decision. |
-| Policies | Versioned, validated before activation, explainable, revertible. Two modes: **observe** (events are marked "would have been blocked") and **enforce**. |
+| Policies | Versioned, validated before activation, explainable, revertible. Two working modes: **observe** (events are marked "would have been blocked") and **enforce**; **off** allows every action of a tenant without applying rules. Layers compose towards the stricter setting, so a tenant layer cannot switch platform enforcement off. |
 | Audit | Tenant, principal, agent, run, tool or model, operation, policy version, rules fired, decision, latency, execution result. No raw secrets, prompts or documents by default. Structured export for external monitoring. |
 | Reliability | Fail-closed for mandatory checks in enforce mode: a detector outage, a policy error or a timeout never turns into a silent allow. Streaming responses are buffered within documented limits; streamed tool-call arguments are checked after assembly and before execution. |
 

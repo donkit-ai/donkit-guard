@@ -1,0 +1,9 @@
+[
+  {"id": "basic-auth-url", "description": "Basic auth credentials embedded in a URL", "regex": "://[^{}\\s/:@]+:([^{}\\s/@]+)@", "keywords": ["://"], "secret_group": 1, "score": 0.9},
+  {"id": "azure-storage-account-key", "description": "Azure Storage account key in a connection string", "regex": "AccountKey=([a-zA-Z0-9+/=]{88})", "keywords": ["accountkey"], "secret_group": 1, "score": 1.0},
+  {"id": "discord-bot-token", "description": "Discord bot token", "regex": "[MN][a-zA-Z0-9_-]{23,26}\\.[a-zA-Z0-9_-]{6}\\.[a-zA-Z0-9_-]{27,38}", "keywords": ["discord", "bot", "token"], "secret_group": 0, "score": 0.8},
+  {"id": "square-oauth-secret", "description": "Square OAuth secret", "regex": "sq0csp-[0-9A-Za-z_-]{43}", "keywords": ["sq0csp"], "secret_group": 0, "score": 1.0},
+  {"id": "twilio-account-key", "description": "Twilio account SID or API key", "regex": "\\b(?:AC|SK)[a-f0-9]{32}\\b", "keywords": ["twilio", "ac", "sk"], "secret_group": 0, "score": 0.7},
+  {"id": "telegram-bot-token", "description": "Telegram bot token", "regex": "\\b[0-9]{8,10}:[0-9A-Za-z_-]{35}\\b", "keywords": ["telegram", "bot"], "secret_group": 0, "score": 0.9},
+  {"id": "mailchimp-api-key", "description": "Mailchimp API key", "regex": "\\b[0-9a-f]{32}-us[0-9]{1,2}\\b", "keywords": ["mailchimp", "-us"], "secret_group": 0, "score": 1.0}
+]

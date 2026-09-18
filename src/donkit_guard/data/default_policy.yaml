@@ -1,0 +1,70 @@
+# Platform layer shipped with the package. Hosts compose tenant layers on top of it.
+schema_version: 1
+version: "default-1"
+mode: observe
+unsupported_content: uninspected
+approval_ttl_s: 300
+segment_limit_bytes: 262144
+layers:
+  - name: platform
+    rules:
+      - id: secrets-mask
+        description: Secrets never leave the host in clear text
+        match:
+          finding_class: [secret]
+          min_score: 0.5
+        action: mask
+        reason: "A secret was found in the payload"
+      - id: secrets-audit
+        description: Low-confidence secret candidates (bare high-entropy tokens) are recorded, not masked
+        match:
+          finding_class: [secret]
+        action: audit
+        reason: "A secret-like token was found in the payload"
+      - id: pii-mask-untrusted-destination
+        description: Personal data is masked before non-platform destinations
+        match:
+          action_kind: [llm_request]
+          finding_class: [pii]
+          min_score: 0.5
+          destination_trust: [tenant, unknown]
+        action: mask
+        reason: "Personal data must not reach a destination outside the platform's trust"
+      - id: pii-audit
+        description: Personal data to platform destinations is recorded
+        match:
+          finding_class: [pii]
+        action: audit
+        reason: "Personal data was found in the payload"
+      - id: injection-audit
+        description: Suspicious instructions are reported, never enforced by themselves
+        match:
+          finding_class: [injection]
+        action: audit
+        reason: "Instruction-like content was detected"
+      - id: tool-read-allow
+        match:
+          action_kind: [tool_call]
+          effect: [read]
+        action: allow
+      - id: tool-execute-allow
+        description: Sandboxed execution is bounded by the sandbox, not by an approval
+        match:
+          action_kind: [tool_call]
+          effect: [execute]
+        action: allow
+      - id: tool-side-effect-approval
+        description: Writes, spending and egress need a human decision; an undeclared effect is gated as a write
+        match:
+          action_kind: [tool_call]
+          effect: [write, spend, egress]
+        action: require_approval
+        reason: "This tool call has a side effect that requires confirmation"
+      - id: llm-allow
+        match:
+          action_kind: [llm_request]
+        action: allow
+      - id: tool-result-allow
+        match:
+          action_kind: [tool_result]
+        action: allow

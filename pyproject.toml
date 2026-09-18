@@ -1,15 +1,15 @@
 [project]
 name = "donkit-guard"
-version = "0.0.1"
+version = "0.1.0a1"
 description = "Open-source guard for LLM traffic and AI-agent actions: secrets/PII checks before the model, policy checks before tool execution, approvals and audit."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Donkit AI", email = "opensource@donkit.ai" }]
 requires-python = ">=3.12,<3.14"
 keywords = ["llm", "security", "guardrails", "pii", "secrets", "mcp", "agents", "policy"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Information Technology",
   "Programming Language :: Python :: 3",
@@ -36,6 +36,7 @@ packages = [{ include = "donkit_guard", from = "src" }]
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.1"
 pytest-asyncio = "^1.4"
+pytest-cov = ">=6.0"
 ruff = "^0.16"
 mypy = "^2.3"
 types-pyyaml = "^6.0"
@@ -57,9 +58,22 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["donkit_guard"]
 
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic resolves model annotations at runtime, so a name used in a model
+# field has to stay importable outside a TYPE_CHECKING block.
+runtime-evaluated-base-classes = ["pydantic.BaseModel", "donkit_guard.context.FrozenModel"]
+
+[tool.ruff.lint.per-file-ignores]
+# Detection data: Russian-language patterns and a Latin/Cyrillic confusables
+# table, where look-alike characters are the subject matter, not a typo.
+"services/pii/recognizers.py" = ["RUF001", "RUF002", "RUF003"]
+"src/donkit_guard/detectors/injection_patterns.py" = ["RUF001", "RUF002", "RUF003"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
+# `services` type-checks only against the guard-pii requirements (presidio, spaCy, fastapi),
+# which are installed in the image, not in the package's dev environment.
 files = ["src"]
 plugins = ["pydantic.mypy"]
 
@@ -67,3 +81,6 @@ plugins = ["pydantic.mypy"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+# `services` is not part of the installed distribution, so the repository root
+# has to be importable for the guard-pii service tests.
+pythonpath = ["."]

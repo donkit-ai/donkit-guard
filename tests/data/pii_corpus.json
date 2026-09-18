@@ -1,0 +1,1914 @@
+{
+ "meta": {
+  "counts": {
+   "ru": 65,
+   "en": 20,
+   "benign": 40
+  },
+  "valid_ids": {
+   "inn10": [
+    "7707123458",
+    "7814567899",
+    "5400987655",
+    "1650321099",
+    "2301876540"
+   ],
+   "inn12": [
+    "771234567859",
+    "501234567802",
+    "160123456700",
+    "230123456711",
+    "661234567874"
+   ],
+   "snils": [
+    "11223344595",
+    "08765430300",
+    "12345678964",
+    "14638725488",
+    "02145678032"
+   ],
+   "cards": [
+    "4532012345678902",
+    "5424187654321092",
+    "371449635398431"
+   ]
+  },
+  "invalid_ids": {
+   "inn10": [
+    "7707123459",
+    "7814567890",
+    "5400987656",
+    "1650321090",
+    "2301876541"
+   ],
+   "inn12": [
+    "771234567850",
+    "501234567803",
+    "160123456701",
+    "230123456712",
+    "661234567875"
+   ],
+   "snils": [
+    "11223344596",
+    "08765430301",
+    "12345678965",
+    "14638725489",
+    "02145678033"
+   ],
+   "cards": [
+    "4532012345678903",
+    "5424187654321093",
+    "371449635398432"
+   ]
+  }
+ },
+ "fragments": [
+  {
+   "id": "ru-001",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-instr,passport-split",
+   "text": "Договор заключён с Ивановым Иваном Ивановичем, паспорт 45 12 345678.",
+   "spans": [
+    {
+     "start": 19,
+     "end": 45,
+     "type": "PERSON",
+     "text": "Ивановым Иваном Ивановичем"
+    },
+    {
+     "start": 55,
+     "end": 67,
+     "type": "PASSPORT",
+     "text": "45 12 345678"
+    }
+   ]
+  },
+  {
+   "id": "ru-002",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-gen",
+   "text": "Заявление Петровой Марии Сергеевны от 12.05.2025 принято к рассмотрению.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 34,
+     "type": "PERSON",
+     "text": "Петровой Марии Сергеевны"
+    }
+   ]
+  },
+  {
+   "id": "ru-003",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-dat",
+   "text": "Прошу выдать доверенность Сидоренко Олегу Николаевичу на получение груза.",
+   "spans": [
+    {
+     "start": 26,
+     "end": 53,
+     "type": "PERSON",
+     "text": "Сидоренко Олегу Николаевичу"
+    }
+   ]
+  },
+  {
+   "id": "ru-004",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-nom,phone",
+   "text": "Ответственный: Кузнецова Анна Павловна, тел. +7 912 345-67-89.",
+   "spans": [
+    {
+     "start": 15,
+     "end": 38,
+     "type": "PERSON",
+     "text": "Кузнецова Анна Павловна"
+    },
+    {
+     "start": 45,
+     "end": 61,
+     "type": "PHONE",
+     "text": "+7 912 345-67-89"
+    }
+   ]
+  },
+  {
+   "id": "ru-005",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-instr,phone",
+   "text": "Свяжитесь со Смирновым Алексеем Викторовичем по номеру 8 (921) 123-45-67.",
+   "spans": [
+    {
+     "start": 13,
+     "end": 44,
+     "type": "PERSON",
+     "text": "Смирновым Алексеем Викторовичем"
+    },
+    {
+     "start": 55,
+     "end": 72,
+     "type": "PHONE",
+     "text": "8 (921) 123-45-67"
+    }
+   ]
+  },
+  {
+   "id": "ru-006",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-prep",
+   "text": "О Гаджиевой Лейле Руслановне ничего не известно с прошлой недели.",
+   "spans": [
+    {
+     "start": 2,
+     "end": 28,
+     "type": "PERSON",
+     "text": "Гаджиевой Лейле Руслановне"
+    }
+   ]
+  },
+  {
+   "id": "ru-007",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-dat",
+   "text": "Претензия к Ахметову Тимуру Маратовичу рассмотрена и отклонена.",
+   "spans": [
+    {
+     "start": 12,
+     "end": 38,
+     "type": "PERSON",
+     "text": "Ахметову Тимуру Маратовичу"
+    }
+   ]
+  },
+  {
+   "id": "ru-008",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-nom-indecl",
+   "text": "Сотрудник Белых Сергей Андреевич переведён в отдел продаж.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 32,
+     "type": "PERSON",
+     "text": "Белых Сергей Андреевич"
+    }
+   ]
+  },
+  {
+   "id": "ru-009",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-acc",
+   "text": "Уволить Козлову Екатерину Дмитриевну по собственному желанию с 01.10.2025.",
+   "spans": [
+    {
+     "start": 8,
+     "end": 36,
+     "type": "PERSON",
+     "text": "Козлову Екатерину Дмитриевну"
+    }
+   ]
+  },
+  {
+   "id": "ru-010",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-dat",
+   "text": "Начислить премию Новикову Дмитрию Олеговичу в размере 25 000 руб.",
+   "spans": [
+    {
+     "start": 17,
+     "end": 43,
+     "type": "PERSON",
+     "text": "Новикову Дмитрию Олеговичу"
+    }
+   ]
+  },
+  {
+   "id": "ru-011",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-dat-indecl",
+   "text": "Выписка выдана Шевченко Ирине Владимировне лично в руки.",
+   "spans": [
+    {
+     "start": 15,
+     "end": 42,
+     "type": "PERSON",
+     "text": "Шевченко Ирине Владимировне"
+    }
+   ]
+  },
+  {
+   "id": "ru-012",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "two-persons-instr",
+   "text": "Акт подписан Морозовым Павлом Игоревичем и Волковой Натальей Юрьевной.",
+   "spans": [
+    {
+     "start": 13,
+     "end": 40,
+     "type": "PERSON",
+     "text": "Морозовым Павлом Игоревичем"
+    },
+    {
+     "start": 43,
+     "end": 69,
+     "type": "PERSON",
+     "text": "Волковой Натальей Юрьевной"
+    }
+   ]
+  },
+  {
+   "id": "ru-013",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-nom",
+   "text": "Клиент Лебедев Артём Русланович просит перезвонить.",
+   "spans": [
+    {
+     "start": 7,
+     "end": 31,
+     "type": "PERSON",
+     "text": "Лебедев Артём Русланович"
+    }
+   ]
+  },
+  {
+   "id": "ru-014",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person-gen",
+   "text": "Письмо для Орловой Светланы Геннадьевны вернулось отправителю.",
+   "spans": [
+    {
+     "start": 11,
+     "end": 39,
+     "type": "PERSON",
+     "text": "Орловой Светланы Геннадьевны"
+    }
+   ]
+  },
+  {
+   "id": "ru-015",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "initials-after",
+   "text": "Директор Иванов И.И. утвердил бюджет на 2026 год.",
+   "spans": [
+    {
+     "start": 9,
+     "end": 20,
+     "type": "PERSON",
+     "text": "Иванов И.И."
+    }
+   ]
+  },
+  {
+   "id": "ru-016",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "initials-before",
+   "text": "Исполнитель: И. И. Иванов, контроль: М.С. Петрова.",
+   "spans": [
+    {
+     "start": 13,
+     "end": 25,
+     "type": "PERSON",
+     "text": "И. И. Иванов"
+    },
+    {
+     "start": 37,
+     "end": 49,
+     "type": "PERSON",
+     "text": "М.С. Петрова"
+    }
+   ]
+  },
+  {
+   "id": "ru-017",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "initials-spaced",
+   "text": "Подпись: Смирнов А. В.",
+   "spans": [
+    {
+     "start": 9,
+     "end": 22,
+     "type": "PERSON",
+     "text": "Смирнов А. В."
+    }
+   ]
+  },
+  {
+   "id": "ru-018",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "initials-cases",
+   "text": "Отчёт подготовила Кузнецова А.П. совместно с Ахметовым Т.М..",
+   "spans": [
+    {
+     "start": 18,
+     "end": 32,
+     "type": "PERSON",
+     "text": "Кузнецова А.П."
+    },
+    {
+     "start": 45,
+     "end": 59,
+     "type": "PERSON",
+     "text": "Ахметовым Т.М."
+    }
+   ]
+  },
+  {
+   "id": "ru-019",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "first-last-chat",
+   "text": "Привет, это Анна Кузнецова, я по поводу заказа.",
+   "spans": [
+    {
+     "start": 12,
+     "end": 26,
+     "type": "PERSON",
+     "text": "Анна Кузнецова"
+    }
+   ]
+  },
+  {
+   "id": "ru-020",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "first-last",
+   "text": "Встречу перенёс Алексей Смирнов на четверг.",
+   "spans": [
+    {
+     "start": 16,
+     "end": 31,
+     "type": "PERSON",
+     "text": "Алексей Смирнов"
+    }
+   ]
+  },
+  {
+   "id": "ru-021",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "first-last-acc",
+   "text": "Записать на приём Марию Петрову к терапевту.",
+   "spans": [
+    {
+     "start": 18,
+     "end": 31,
+     "type": "PERSON",
+     "text": "Марию Петрову"
+    }
+   ]
+  },
+  {
+   "id": "ru-022",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "name-patronymic",
+   "text": "Уважаемая Екатерина Дмитриевна, ваш заказ готов к выдаче.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 30,
+     "type": "PERSON",
+     "text": "Екатерина Дмитриевна"
+    }
+   ]
+  },
+  {
+   "id": "ru-023",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "first-name-only",
+   "text": "Позвонить Тимуру насчёт документов.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 16,
+     "type": "PERSON",
+     "text": "Тимуру"
+    }
+   ]
+  },
+  {
+   "id": "ru-024",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "surname-only-gen",
+   "text": "По словам Иванова, отгрузка была в среду.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 17,
+     "type": "PERSON",
+     "text": "Иванова"
+    }
+   ]
+  },
+  {
+   "id": "ru-025",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone-parens",
+   "text": "Телефон для связи: +7 (495) 123-45-67, доб. 204.",
+   "spans": [
+    {
+     "start": 19,
+     "end": 37,
+     "type": "PHONE",
+     "text": "+7 (495) 123-45-67"
+    }
+   ]
+  },
+  {
+   "id": "ru-026",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone-dashes",
+   "text": "Моб.: 8-912-345-67-89",
+   "spans": [
+    {
+     "start": 6,
+     "end": 21,
+     "type": "PHONE",
+     "text": "8-912-345-67-89"
+    }
+   ]
+  },
+  {
+   "id": "ru-027",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone-compact-plus",
+   "text": "Звоните +79123456789 после 18:00.",
+   "spans": [
+    {
+     "start": 8,
+     "end": 20,
+     "type": "PHONE",
+     "text": "+79123456789"
+    }
+   ]
+  },
+  {
+   "id": "ru-028",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone-compact-8",
+   "text": "Номер курьера 89211234567.",
+   "spans": [
+    {
+     "start": 14,
+     "end": 25,
+     "type": "PHONE",
+     "text": "89211234567"
+    }
+   ]
+  },
+  {
+   "id": "ru-029",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone-800",
+   "text": "Горячая линия: 8 800 555 35 36, бесплатно по России.",
+   "spans": [
+    {
+     "start": 15,
+     "end": 30,
+     "type": "PHONE",
+     "text": "8 800 555 35 36"
+    }
+   ]
+  },
+  {
+   "id": "ru-030",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone,email",
+   "text": "Тел.: +7-921-123-45-67; e-mail: a.smirnov@example.ru.",
+   "spans": [
+    {
+     "start": 6,
+     "end": 22,
+     "type": "PHONE",
+     "text": "+7-921-123-45-67"
+    },
+    {
+     "start": 32,
+     "end": 52,
+     "type": "EMAIL",
+     "text": "a.smirnov@example.ru"
+    }
+   ]
+  },
+  {
+   "id": "ru-031",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "initials,phone-spaces",
+   "text": "Контакт Волкова Н.Ю.: +7 921 123 45 67",
+   "spans": [
+    {
+     "start": 8,
+     "end": 20,
+     "type": "PERSON",
+     "text": "Волкова Н.Ю."
+    },
+    {
+     "start": 22,
+     "end": 38,
+     "type": "PHONE",
+     "text": "+7 921 123 45 67"
+    }
+   ]
+  },
+  {
+   "id": "ru-032",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "phone-parens-spaces",
+   "text": "WhatsApp +7 (921) 123 45 67 — пишите в любое время.",
+   "spans": [
+    {
+     "start": 9,
+     "end": 27,
+     "type": "PHONE",
+     "text": "+7 (921) 123 45 67"
+    }
+   ]
+  },
+  {
+   "id": "ru-033",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "passport-series-number-words",
+   "text": "Паспорт серия 45 12 номер 345678, выдан ОВД района Хамовники 12.03.2010.",
+   "spans": [
+    {
+     "start": 14,
+     "end": 19,
+     "type": "PASSPORT",
+     "text": "45 12"
+    },
+    {
+     "start": 26,
+     "end": 32,
+     "type": "PASSPORT",
+     "text": "345678"
+    }
+   ]
+  },
+  {
+   "id": "ru-034",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "passport-4-6",
+   "text": "Паспорт 4512 345678 выдан 12.03.2010.",
+   "spans": [
+    {
+     "start": 8,
+     "end": 19,
+     "type": "PASSPORT",
+     "text": "4512 345678"
+    }
+   ]
+  },
+  {
+   "id": "ru-035",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "passport-2-2-6",
+   "text": "Паспорт: 45 12 345678",
+   "spans": [
+    {
+     "start": 9,
+     "end": 21,
+     "type": "PASSPORT",
+     "text": "45 12 345678"
+    }
+   ]
+  },
+  {
+   "id": "ru-036",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "passport-contiguous",
+   "text": "Паспортные данные: 4512345678.",
+   "spans": [
+    {
+     "start": 19,
+     "end": 29,
+     "type": "PASSPORT",
+     "text": "4512345678"
+    }
+   ]
+  },
+  {
+   "id": "ru-037",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "passport-series-no",
+   "text": "серия 4512 № 345678, код подразделения 770-001",
+   "spans": [
+    {
+     "start": 6,
+     "end": 10,
+     "type": "PASSPORT",
+     "text": "4512"
+    },
+    {
+     "start": 13,
+     "end": 19,
+     "type": "PASSPORT",
+     "text": "345678"
+    }
+   ]
+  },
+  {
+   "id": "ru-038",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "passport,person",
+   "text": "Документ: паспорт гражданина РФ 46 08 123456, Иванов Иван Иванович.",
+   "spans": [
+    {
+     "start": 32,
+     "end": 44,
+     "type": "PASSPORT",
+     "text": "46 08 123456"
+    },
+    {
+     "start": 46,
+     "end": 66,
+     "type": "PERSON",
+     "text": "Иванов Иван Иванович"
+    }
+   ]
+  },
+  {
+   "id": "ru-039",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "snils-formatted",
+   "text": "СНИЛС 112-233-445 95.",
+   "spans": [
+    {
+     "start": 6,
+     "end": 20,
+     "type": "SNILS",
+     "text": "112-233-445 95"
+    }
+   ]
+  },
+  {
+   "id": "ru-040",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "snils-formatted-2",
+   "text": "Страховой номер: 087-654-303 00",
+   "spans": [
+    {
+     "start": 17,
+     "end": 31,
+     "type": "SNILS",
+     "text": "087-654-303 00"
+    }
+   ]
+  },
+  {
+   "id": "ru-041",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "snils-bare",
+   "text": "снилс 12345678964 (без разделителей)",
+   "spans": [
+    {
+     "start": 6,
+     "end": 17,
+     "type": "SNILS",
+     "text": "12345678964"
+    }
+   ]
+  },
+  {
+   "id": "ru-042",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "snils,inn12,initials",
+   "text": "Сотрудник Морозов П.И., СНИЛС 146-387-254 88, ИНН 771234567859.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 22,
+     "type": "PERSON",
+     "text": "Морозов П.И."
+    },
+    {
+     "start": 30,
+     "end": 44,
+     "type": "SNILS",
+     "text": "146-387-254 88"
+    },
+    {
+     "start": 50,
+     "end": 62,
+     "type": "INN",
+     "text": "771234567859"
+    }
+   ]
+  },
+  {
+   "id": "ru-043",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "snils-bare-no-context",
+   "text": "Лебедев Артём: 02145678032",
+   "spans": [
+    {
+     "start": 0,
+     "end": 13,
+     "type": "PERSON",
+     "text": "Лебедев Артём"
+    },
+    {
+     "start": 15,
+     "end": 26,
+     "type": "SNILS",
+     "text": "02145678032"
+    }
+   ]
+  },
+  {
+   "id": "ru-044",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn10",
+   "text": "ИНН 7707123458, КПП 770701001.",
+   "spans": [
+    {
+     "start": 4,
+     "end": 14,
+     "type": "INN",
+     "text": "7707123458"
+    }
+   ]
+  },
+  {
+   "id": "ru-045",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn10-2",
+   "text": "ИНН организации 7814567899.",
+   "spans": [
+    {
+     "start": 16,
+     "end": 26,
+     "type": "INN",
+     "text": "7814567899"
+    }
+   ]
+  },
+  {
+   "id": "ru-046",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn12",
+   "text": "ИНН физлица 501234567802.",
+   "spans": [
+    {
+     "start": 12,
+     "end": 24,
+     "type": "INN",
+     "text": "501234567802"
+    }
+   ]
+  },
+  {
+   "id": "ru-047",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn12-2",
+   "text": "Налогоплательщик: 160123456700",
+   "spans": [
+    {
+     "start": 18,
+     "end": 30,
+     "type": "INN",
+     "text": "160123456700"
+    }
+   ]
+  },
+  {
+   "id": "ru-048",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn10-with-ogrn",
+   "text": "Реквизиты: ИНН 5400987655 ОГРН 1027700132195",
+   "spans": [
+    {
+     "start": 15,
+     "end": 25,
+     "type": "INN",
+     "text": "5400987655"
+    }
+   ]
+  },
+  {
+   "id": "ru-049",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn12,phone",
+   "text": "Самозанятый, ИНН 230123456711, телефон +7 999 123-45-67.",
+   "spans": [
+    {
+     "start": 17,
+     "end": 29,
+     "type": "INN",
+     "text": "230123456711"
+    },
+    {
+     "start": 39,
+     "end": 55,
+     "type": "PHONE",
+     "text": "+7 999 123-45-67"
+    }
+   ]
+  },
+  {
+   "id": "ru-050",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "inn10-no-left-context",
+   "text": "1650321099 — ИНН контрагента",
+   "spans": [
+    {
+     "start": 0,
+     "end": 10,
+     "type": "INN",
+     "text": "1650321099"
+    }
+   ]
+  },
+  {
+   "id": "ru-051",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "email",
+   "text": "Почта: ivanov.ii@example.ru",
+   "spans": [
+    {
+     "start": 7,
+     "end": 27,
+     "type": "EMAIL",
+     "text": "ivanov.ii@example.ru"
+    }
+   ]
+  },
+  {
+   "id": "ru-052",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "email-2",
+   "text": "Отправьте копию на maria.petrova1985@mail.example и в бухгалтерию.",
+   "spans": [
+    {
+     "start": 19,
+     "end": 49,
+     "type": "EMAIL",
+     "text": "maria.petrova1985@mail.example"
+    }
+   ]
+  },
+  {
+   "id": "ru-053",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "email,person",
+   "text": "o.sidorenko@corp.example.com — новый адрес Олега Сидоренко.",
+   "spans": [
+    {
+     "start": 0,
+     "end": 28,
+     "type": "EMAIL",
+     "text": "o.sidorenko@corp.example.com"
+    },
+    {
+     "start": 43,
+     "end": 58,
+     "type": "PERSON",
+     "text": "Олега Сидоренко"
+    }
+   ]
+  },
+  {
+   "id": "ru-054",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "dob-dots",
+   "text": "Дата рождения: 12.03.1985",
+   "spans": [
+    {
+     "start": 15,
+     "end": 25,
+     "type": "DATE_TIME",
+     "text": "12.03.1985"
+    }
+   ]
+  },
+  {
+   "id": "ru-055",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "person,dob-words",
+   "text": "Кузнецова Анна Павловна, родилась 5 мая 1990 года.",
+   "spans": [
+    {
+     "start": 0,
+     "end": 23,
+     "type": "PERSON",
+     "text": "Кузнецова Анна Павловна"
+    },
+    {
+     "start": 34,
+     "end": 49,
+     "type": "DATE_TIME",
+     "text": "5 мая 1990 года"
+    }
+   ]
+  },
+  {
+   "id": "ru-056",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "dob-iso",
+   "text": "д.р. 1987-11-23, место рождения г. Тула",
+   "spans": [
+    {
+     "start": 5,
+     "end": 15,
+     "type": "DATE_TIME",
+     "text": "1987-11-23"
+    }
+   ]
+  },
+  {
+   "id": "ru-057",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "dob-year",
+   "text": "Год рождения 1979, пол мужской.",
+   "spans": [
+    {
+     "start": 13,
+     "end": 17,
+     "type": "DATE_TIME",
+     "text": "1979"
+    }
+   ]
+  },
+  {
+   "id": "ru-058",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "address-full",
+   "text": "Адрес: г. Москва, ул. Ленина, д. 5, кв. 12",
+   "spans": [
+    {
+     "start": 7,
+     "end": 42,
+     "type": "LOCATION",
+     "text": "г. Москва, ул. Ленина, д. 5, кв. 12"
+    }
+   ]
+  },
+  {
+   "id": "ru-059",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "address-2",
+   "text": "Проживает по адресу Санкт-Петербург, Невский проспект, 28.",
+   "spans": [
+    {
+     "start": 20,
+     "end": 57,
+     "type": "LOCATION",
+     "text": "Санкт-Петербург, Невский проспект, 28"
+    }
+   ]
+  },
+  {
+   "id": "ru-060",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "address,initials",
+   "text": "Доставка: г. Казань, ул. Баумана, д. 10, кв. 4, получатель Ахметов Т.М..",
+   "spans": [
+    {
+     "start": 10,
+     "end": 46,
+     "type": "LOCATION",
+     "text": "г. Казань, ул. Баумана, д. 10, кв. 4"
+    },
+    {
+     "start": 59,
+     "end": 71,
+     "type": "PERSON",
+     "text": "Ахметов Т.М."
+    }
+   ]
+  },
+  {
+   "id": "ru-061",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "address-3",
+   "text": "Зарегистрирован: г. Новосибирск, ул. Кирова, 3, индекс 630000",
+   "spans": [
+    {
+     "start": 17,
+     "end": 46,
+     "type": "LOCATION",
+     "text": "г. Новосибирск, ул. Кирова, 3"
+    }
+   ]
+  },
+  {
+   "id": "ru-062",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "mixed-form",
+   "text": "Анкета. ФИО: Смирнов Алексей Викторович. Паспорт: 45 12 345678. СНИЛС: 112-233-445 95. ИНН: 661234567874. Тел.: +7 912 345-67-89. E-mail: a.smirnov@example.ru.",
+   "spans": [
+    {
+     "start": 13,
+     "end": 39,
+     "type": "PERSON",
+     "text": "Смирнов Алексей Викторович"
+    },
+    {
+     "start": 50,
+     "end": 62,
+     "type": "PASSPORT",
+     "text": "45 12 345678"
+    },
+    {
+     "start": 71,
+     "end": 85,
+     "type": "SNILS",
+     "text": "112-233-445 95"
+    },
+    {
+     "start": 92,
+     "end": 104,
+     "type": "INN",
+     "text": "661234567874"
+    },
+    {
+     "start": 112,
+     "end": 128,
+     "type": "PHONE",
+     "text": "+7 912 345-67-89"
+    },
+    {
+     "start": 138,
+     "end": 158,
+     "type": "EMAIL",
+     "text": "a.smirnov@example.ru"
+    }
+   ]
+  },
+  {
+   "id": "ru-063",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "mixed-chat",
+   "text": "Клиент Петрова М.С. (+7 921 123 45 67) просит сменить e-mail на m.petrova@example.ru.",
+   "spans": [
+    {
+     "start": 7,
+     "end": 19,
+     "type": "PERSON",
+     "text": "Петрова М.С."
+    },
+    {
+     "start": 21,
+     "end": 37,
+     "type": "PHONE",
+     "text": "+7 921 123 45 67"
+    },
+    {
+     "start": 64,
+     "end": 84,
+     "type": "EMAIL",
+     "text": "m.petrova@example.ru"
+    }
+   ]
+  },
+  {
+   "id": "ru-064",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "card-ru,initials",
+   "text": "Оплата картой 4532 0123 4567 8902 прошла успешно, владелец Новиков Д.О..",
+   "spans": [
+    {
+     "start": 14,
+     "end": 33,
+     "type": "CREDIT_CARD",
+     "text": "4532 0123 4567 8902"
+    },
+    {
+     "start": 59,
+     "end": 71,
+     "type": "PERSON",
+     "text": "Новиков Д.О."
+    }
+   ]
+  },
+  {
+   "id": "ru-065",
+   "group": "ru",
+   "lang": "ru",
+   "tag": "initials-cases,address",
+   "text": "Иск подан Ивановым И.И. к Петровой М.С., адрес ответчика г. Москва, ул. Тверская, д. 1.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 23,
+     "type": "PERSON",
+     "text": "Ивановым И.И."
+    },
+    {
+     "start": 26,
+     "end": 39,
+     "type": "PERSON",
+     "text": "Петровой М.С."
+    },
+    {
+     "start": 57,
+     "end": 86,
+     "type": "LOCATION",
+     "text": "г. Москва, ул. Тверская, д. 1"
+    }
+   ]
+  },
+  {
+   "id": "en-066",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,email",
+   "text": "Please contact John Smith at john.smith@example.com.",
+   "spans": [
+    {
+     "start": 15,
+     "end": 25,
+     "type": "PERSON",
+     "text": "John Smith"
+    },
+    {
+     "start": 29,
+     "end": 51,
+     "type": "EMAIL",
+     "text": "john.smith@example.com"
+    }
+   ]
+  },
+  {
+   "id": "en-067",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,phone-parens",
+   "text": "Call Emily Johnson on (212) 555-0142 tomorrow morning.",
+   "spans": [
+    {
+     "start": 5,
+     "end": 18,
+     "type": "PERSON",
+     "text": "Emily Johnson"
+    },
+    {
+     "start": 22,
+     "end": 36,
+     "type": "PHONE",
+     "text": "(212) 555-0142"
+    }
+   ]
+  },
+  {
+   "id": "en-068",
+   "group": "en",
+   "lang": "en",
+   "tag": "phone-intl",
+   "text": "My phone number is +1-415-555-0199.",
+   "spans": [
+    {
+     "start": 19,
+     "end": 34,
+     "type": "PHONE",
+     "text": "+1-415-555-0199"
+    }
+   ]
+  },
+  {
+   "id": "en-069",
+   "group": "en",
+   "lang": "en",
+   "tag": "ssn",
+   "text": "SSN: 536-90-4271",
+   "spans": [
+    {
+     "start": 5,
+     "end": 16,
+     "type": "US_SSN",
+     "text": "536-90-4271"
+    }
+   ]
+  },
+  {
+   "id": "en-070",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,ssn,dob",
+   "text": "The applicant, Michael Brown, SSN 412-57-3390, was born on March 3, 1988.",
+   "spans": [
+    {
+     "start": 15,
+     "end": 28,
+     "type": "PERSON",
+     "text": "Michael Brown"
+    },
+    {
+     "start": 34,
+     "end": 45,
+     "type": "US_SSN",
+     "text": "412-57-3390"
+    },
+    {
+     "start": 59,
+     "end": 72,
+     "type": "DATE_TIME",
+     "text": "March 3, 1988"
+    }
+   ]
+  },
+  {
+   "id": "en-071",
+   "group": "en",
+   "lang": "en",
+   "tag": "card-spaces",
+   "text": "Card number 4532 0123 4567 8902 expires 09/28.",
+   "spans": [
+    {
+     "start": 12,
+     "end": 31,
+     "type": "CREDIT_CARD",
+     "text": "4532 0123 4567 8902"
+    }
+   ]
+  },
+  {
+   "id": "en-072",
+   "group": "en",
+   "lang": "en",
+   "tag": "card-compact",
+   "text": "Charge 5424187654321092 for $49.99.",
+   "spans": [
+    {
+     "start": 7,
+     "end": 23,
+     "type": "CREDIT_CARD",
+     "text": "5424187654321092"
+    }
+   ]
+  },
+  {
+   "id": "en-073",
+   "group": "en",
+   "lang": "en",
+   "tag": "card-amex",
+   "text": "Amex 3714-496353-98431 on file.",
+   "spans": [
+    {
+     "start": 5,
+     "end": 22,
+     "type": "CREDIT_CARD",
+     "text": "3714-496353-98431"
+    }
+   ]
+  },
+  {
+   "id": "en-074",
+   "group": "en",
+   "lang": "en",
+   "tag": "email",
+   "text": "Send the invoice to sarah.connor@cyberdyne.example.",
+   "spans": [
+    {
+     "start": 20,
+     "end": 50,
+     "type": "EMAIL",
+     "text": "sarah.connor@cyberdyne.example"
+    }
+   ]
+  },
+  {
+   "id": "en-075",
+   "group": "en",
+   "lang": "en",
+   "tag": "two-persons",
+   "text": "Dr. Robert Wilson will review the case with Anna Lee.",
+   "spans": [
+    {
+     "start": 0,
+     "end": 17,
+     "type": "PERSON",
+     "text": "Dr. Robert Wilson"
+    },
+    {
+     "start": 44,
+     "end": 52,
+     "type": "PERSON",
+     "text": "Anna Lee"
+    }
+   ]
+  },
+  {
+   "id": "en-076",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,email,phone",
+   "text": "Contact: Maria Garcia, maria.garcia@example.org, 415-555-0133.",
+   "spans": [
+    {
+     "start": 9,
+     "end": 21,
+     "type": "PERSON",
+     "text": "Maria Garcia"
+    },
+    {
+     "start": 23,
+     "end": 47,
+     "type": "EMAIL",
+     "text": "maria.garcia@example.org"
+    },
+    {
+     "start": 49,
+     "end": 61,
+     "type": "PHONE",
+     "text": "415-555-0133"
+    }
+   ]
+  },
+  {
+   "id": "en-077",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,dob",
+   "text": "Patient David Miller, DOB 1975-08-14.",
+   "spans": [
+    {
+     "start": 8,
+     "end": 20,
+     "type": "PERSON",
+     "text": "David Miller"
+    },
+    {
+     "start": 26,
+     "end": 36,
+     "type": "DATE_TIME",
+     "text": "1975-08-14"
+    }
+   ]
+  },
+  {
+   "id": "en-078",
+   "group": "en",
+   "lang": "en",
+   "tag": "phone-spaces,email",
+   "text": "Reach me at 212 555 0188 or d.miller@example.net.",
+   "spans": [
+    {
+     "start": 12,
+     "end": 24,
+     "type": "PHONE",
+     "text": "212 555 0188"
+    },
+    {
+     "start": 28,
+     "end": 48,
+     "type": "EMAIL",
+     "text": "d.miller@example.net"
+    }
+   ]
+  },
+  {
+   "id": "en-079",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,ssn",
+   "text": "Employee Jessica Taylor updated her SSN to 321-44-8765.",
+   "spans": [
+    {
+     "start": 9,
+     "end": 23,
+     "type": "PERSON",
+     "text": "Jessica Taylor"
+    },
+    {
+     "start": 43,
+     "end": 54,
+     "type": "US_SSN",
+     "text": "321-44-8765"
+    }
+   ]
+  },
+  {
+   "id": "en-080",
+   "group": "en",
+   "lang": "en",
+   "tag": "first-name-only",
+   "text": "Hi, I'm Tom from accounting.",
+   "spans": [
+    {
+     "start": 8,
+     "end": 11,
+     "type": "PERSON",
+     "text": "Tom"
+    }
+   ]
+  },
+  {
+   "id": "en-081",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,address",
+   "text": "Ship to James Anderson, 742 Evergreen Terrace, Springfield.",
+   "spans": [
+    {
+     "start": 8,
+     "end": 22,
+     "type": "PERSON",
+     "text": "James Anderson"
+    },
+    {
+     "start": 24,
+     "end": 58,
+     "type": "LOCATION",
+     "text": "742 Evergreen Terrace, Springfield"
+    }
+   ]
+  },
+  {
+   "id": "en-082",
+   "group": "en",
+   "lang": "en",
+   "tag": "card-spaces-2",
+   "text": "Refund to card ending 5424 1876 5432 1092.",
+   "spans": [
+    {
+     "start": 22,
+     "end": 41,
+     "type": "CREDIT_CARD",
+     "text": "5424 1876 5432 1092"
+    }
+   ]
+  },
+  {
+   "id": "en-083",
+   "group": "en",
+   "lang": "en",
+   "tag": "two-persons-2",
+   "text": "Meeting with Olivia Martinez and William Thomas at 3pm.",
+   "spans": [
+    {
+     "start": 13,
+     "end": 28,
+     "type": "PERSON",
+     "text": "Olivia Martinez"
+    },
+    {
+     "start": 33,
+     "end": 47,
+     "type": "PERSON",
+     "text": "William Thomas"
+    }
+   ]
+  },
+  {
+   "id": "en-084",
+   "group": "en",
+   "lang": "en",
+   "tag": "person,phone-intl-parens",
+   "text": "Emergency contact: Linda White +1 (646) 555-0177.",
+   "spans": [
+    {
+     "start": 19,
+     "end": 30,
+     "type": "PERSON",
+     "text": "Linda White"
+    },
+    {
+     "start": 31,
+     "end": 48,
+     "type": "PHONE",
+     "text": "+1 (646) 555-0177"
+    }
+   ]
+  },
+  {
+   "id": "en-085",
+   "group": "en",
+   "lang": "en",
+   "tag": "email,ssn",
+   "text": "Her email linda.white@example.com bounced; SSN on file 287-61-5502.",
+   "spans": [
+    {
+     "start": 10,
+     "end": 33,
+     "type": "EMAIL",
+     "text": "linda.white@example.com"
+    },
+    {
+     "start": 55,
+     "end": 66,
+     "type": "US_SSN",
+     "text": "287-61-5502"
+    }
+   ]
+  },
+  {
+   "id": "benign-086",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "inn10-invalid-checksum",
+   "text": "ИНН 7707123459 не прошёл проверку в ФНС.",
+   "spans": []
+  },
+  {
+   "id": "benign-087",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "inn12-invalid-checksum",
+   "text": "Проверьте номер 771234567850 — похоже, опечатка.",
+   "spans": []
+  },
+  {
+   "id": "benign-088",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "snils-invalid-checksum",
+   "text": "СНИЛС 112-233-445 96 отклонён: неверная контрольная сумма.",
+   "spans": []
+  },
+  {
+   "id": "benign-089",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "snils-bare-invalid",
+   "text": "Идентификатор 08765430301 в системе не найден.",
+   "spans": []
+  },
+  {
+   "id": "benign-090",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "order-10-digits",
+   "text": "Заказ № 7814567890 отправлен транспортной компанией.",
+   "spans": []
+  },
+  {
+   "id": "benign-091",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "sku",
+   "text": "Артикул WB-4512-3456, цвет синий, размер M.",
+   "spans": []
+  },
+  {
+   "id": "benign-092",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "versions",
+   "text": "Версия 3.8.16, сборка 20260918.1, ядро 6.1.0.",
+   "spans": []
+  },
+  {
+   "id": "benign-093",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "uuid",
+   "text": "Request id 3f2b9c1e-7d4a-4b8e-9c2f-1a2b3c4d5e6f завершился с кодом 200.",
+   "spans": []
+  },
+  {
+   "id": "benign-094",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "money",
+   "text": "Сумма к оплате 1 250 000 руб., НДС 20 % — 250 000 руб.",
+   "spans": []
+  },
+  {
+   "id": "benign-095",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "date-non-birth",
+   "text": "Срок поставки 15.03.2026, отгрузка со склада 17.03.2026.",
+   "spans": []
+  },
+  {
+   "id": "benign-096",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "business-plain",
+   "text": "Подготовьте отчёт по продажам за третий квартал к пятнице.",
+   "spans": []
+  },
+  {
+   "id": "benign-097",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "time",
+   "text": "Совещание перенесено на 10:30, переговорная 4Б.",
+   "spans": []
+  },
+  {
+   "id": "benign-098",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "tracking-14",
+   "text": "Трек-номер 80512345678901 отслеживается на сайте Почты России.",
+   "spans": []
+  },
+  {
+   "id": "benign-099",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "timestamp-10-digits",
+   "text": "Unix timestamp 1726650001 соответствует 18 сентября 2024 года.",
+   "spans": []
+  },
+  {
+   "id": "benign-100",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "otp-6",
+   "text": "Код подтверждения 482913 действителен 10 минут.",
+   "spans": []
+  },
+  {
+   "id": "benign-101",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "contract-no",
+   "text": "Номер договора 2026-09/0451 от 01.09.2026.",
+   "spans": []
+  },
+  {
+   "id": "benign-102",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "serial",
+   "text": "Серийный номер устройства SN-9834-XK22-77.",
+   "spans": []
+  },
+  {
+   "id": "benign-103",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "digits-4-3-3",
+   "text": "Партия 4512 345 678 упакована в 12 коробок.",
+   "spans": []
+  },
+  {
+   "id": "benign-104",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "dimensions",
+   "text": "Габариты 45x12x34 см, вес 5,6 кг.",
+   "spans": []
+  },
+  {
+   "id": "benign-105",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "invoice-6",
+   "text": "Счёт-фактура № 345678 от 05.09.2026 на сумму 12 340,50 руб.",
+   "spans": []
+  },
+  {
+   "id": "benign-106",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "fx",
+   "text": "Курс: 91,23 руб. за доллар, 99,10 руб. за евро.",
+   "spans": []
+  },
+  {
+   "id": "benign-107",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "rates",
+   "text": "Ставка рефинансирования 16 %, срок кредита 36 месяцев.",
+   "spans": []
+  },
+  {
+   "id": "benign-108",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "postcode",
+   "text": "Индекс 101000, склад открыт с 9:00 до 18:00.",
+   "spans": []
+  },
+  {
+   "id": "benign-109",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "qty",
+   "text": "Кол-во 12, цена 345,00, итого 4 140,00.",
+   "spans": []
+  },
+  {
+   "id": "benign-110",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "git-hash",
+   "text": "Коммит a1b2c3d4e5f6 влит в ветку develop.",
+   "spans": []
+  },
+  {
+   "id": "benign-111",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "print",
+   "text": "Тираж 5000 экз., формат 210x297 мм.",
+   "spans": []
+  },
+  {
+   "id": "benign-112",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "error-codes",
+   "text": "Ошибка 0x80004005 при установке обновления KB5031356.",
+   "spans": []
+  },
+  {
+   "id": "benign-113",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "telemetry",
+   "text": "Температура в серверной 21,5 °C, влажность 40 %.",
+   "spans": []
+  },
+  {
+   "id": "benign-114",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "ticket-13",
+   "text": "Билет № 7712345678901 на рейс SU 1234.",
+   "spans": []
+  },
+  {
+   "id": "benign-115",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "okved-okpo-okato",
+   "text": "ОКВЭД 62.01, ОКПО 12345678, ОКАТО 45286585000.",
+   "spans": []
+  },
+  {
+   "id": "benign-116",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "policy",
+   "text": "Пароль должен содержать не менее 12 символов.",
+   "spans": []
+  },
+  {
+   "id": "benign-117",
+   "group": "benign",
+   "lang": "ru",
+   "tag": "promo",
+   "text": "Скидка 15 % по промокоду AUTUMN2026 до 30.09.2026.",
+   "spans": []
+  },
+  {
+   "id": "benign-118",
+   "group": "benign",
+   "lang": "en",
+   "tag": "card-invalid-luhn",
+   "text": "Card 4532012345678903 was declined: invalid number.",
+   "spans": []
+  },
+  {
+   "id": "benign-119",
+   "group": "benign",
+   "lang": "en",
+   "tag": "invoice-10-digits",
+   "text": "Invoice #1234567890 is due on 2026-10-01.",
+   "spans": []
+  },
+  {
+   "id": "benign-120",
+   "group": "benign",
+   "lang": "en",
+   "tag": "build",
+   "text": "Build 20260918.1 passed all 1 342 tests in 4m12s.",
+   "spans": []
+  },
+  {
+   "id": "benign-121",
+   "group": "benign",
+   "lang": "en",
+   "tag": "order-tracking",
+   "text": "Order ORD-2026-000451 shipped via DHL, tracking JD014600003456789012.",
+   "spans": []
+  },
+  {
+   "id": "benign-122",
+   "group": "benign",
+   "lang": "en",
+   "tag": "ticket-plain",
+   "text": "Ticket ABC-2419 moved to In Review; ETA next sprint.",
+   "spans": []
+  },
+  {
+   "id": "benign-123",
+   "group": "benign",
+   "lang": "en",
+   "tag": "config",
+   "text": "Set the pool size to 20 and the timeout to 30 seconds.",
+   "spans": []
+  },
+  {
+   "id": "benign-124",
+   "group": "benign",
+   "lang": "en",
+   "tag": "versions-en",
+   "text": "Kubernetes 1.30 deprecates the v1beta1 API; migrate before upgrading.",
+   "spans": []
+  },
+  {
+   "id": "benign-125",
+   "group": "benign",
+   "lang": "en",
+   "tag": "metrics",
+   "text": "Latency p95 is 240 ms at 1 200 rps.",
+   "spans": []
+  }
+ ]
+}
