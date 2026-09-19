@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a2] - 2026-09-19
+
+### Added
+
+- `EngineSettings.preview_chars`: how many characters of each argument an approval card and an audit row keep (default 256). A host whose approvers read the card before allowing a write raises it so the content being written is visible in full.
+
 ## [0.1.0a1] - 2026-09-18
 
 ### Added

@@ -45,6 +45,10 @@ _CODE_FOR_OUTCOME: dict[Outcome, str] = {
 class EngineSettings(FrozenModel):
     max_locations: int = 100
     max_preview_entries: int = 100
+    # Characters kept per argument preview on approval cards and audit rows. An
+    # approver has to be able to read what a write is about to store, so a host
+    # with a card UI raises this well above the audit-friendly default.
+    preview_chars: int = 256
 
 
 @dataclass(frozen=True)
@@ -303,6 +307,7 @@ class Engine:
                 action.arguments,
                 spans,
                 payload,
+                limit=self._settings.preview_chars,
                 max_entries=self._settings.max_preview_entries,
             )
             if action.kind is ActionKind.TOOL_CALL
