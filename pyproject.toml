@@ -1,6 +1,6 @@
 [project]
 name = "donkit-guard"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Open-source guard for LLM traffic and AI-agent actions: secrets/PII checks before the model, policy checks before tool execution, approvals and audit."
 readme = "README.md"
 license = "Apache-2.0"

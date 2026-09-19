@@ -404,6 +404,17 @@ async def test_preview_entries_are_capped_by_the_engine_settings(
     }
 
 
+async def test_preview_length_is_set_by_the_engine_settings(
+    tool_context: GuardContext,
+) -> None:
+    engine, _ = _engine(settings=EngineSettings(preview_chars=8))
+    ctx = _tool_call(tool_context, "write_file", {"content": "0123456789abcdef", "path": "a.txt"})
+    decision = await engine.evaluate(ctx, Payload())
+    # The limit counts the ellipsis that marks the cut.
+    assert decision.display_args_redacted["/content"] == "0123456…"
+    assert decision.display_args_redacted["/path"] == "a.txt"
+
+
 async def test_evaluate_can_skip_the_audit_and_record_decision_fails_closed(
     llm_context: GuardContext,
 ) -> None:
