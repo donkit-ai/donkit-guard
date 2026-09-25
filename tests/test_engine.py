@@ -137,6 +137,22 @@ async def test_secret_in_llm_request_is_masked_in_enforce(llm_context: GuardCont
     assert audit.events and audit.events[0].event_type == "decision"
 
 
+async def test_a_masked_decision_names_the_spans_it_masked(llm_context: GuardContext) -> None:
+    engine, _ = _engine()
+    payload = _user(SECRET_TEXT)
+    decision = await engine.evaluate(llm_context, payload)
+    assert decision.outcome is Outcome.MASK
+    (segment_id,) = decision.masked_segments
+    assert decision.masked_locations
+    assert {loc.segment_id for loc in decision.masked_locations} == {segment_id}
+    (segment,) = [s for s in payload.segments if s.id == segment_id]
+    masked_text = decision.masked_segments[segment_id]
+    for loc in decision.masked_locations:
+        assert loc.cls.value == "secret" and loc.path == segment.path
+        assert segment.text[loc.start : loc.end] == SECRET
+        assert SECRET not in masked_text
+
+
 async def test_observe_mode_allows_but_records_would_outcome(llm_context: GuardContext) -> None:
     engine, _ = _engine(PolicyMode.OBSERVE)
     decision = await engine.evaluate(llm_context, _user(SECRET_TEXT))
@@ -145,7 +161,7 @@ async def test_observe_mode_allows_but_records_would_outcome(llm_context: GuardC
         and decision.would_block
         and decision.would_outcome is Outcome.MASK
     )
-    assert decision.masked_segments == {}
+    assert decision.masked_segments == {} and decision.masked_locations == ()
 
 
 async def test_off_mode_short_circuits_without_audit(llm_context: GuardContext) -> None:
@@ -368,7 +384,7 @@ async def test_detector_failure_clears_the_masks_it_denies(llm_context: GuardCon
     engine, _ = _engine(ner_client=FailingDetectorClient("down"))
     denied = await engine.evaluate(llm_context, _user(SECRET_TEXT))
     assert denied.outcome is Outcome.DENY and denied.explanation.code == "detector_unavailable"
-    assert denied.masked_segments == {}
+    assert denied.masked_segments == {} and denied.masked_locations == ()
 
 
 async def test_tool_argument_previews_are_redacted_and_reused_by_the_audit_event(

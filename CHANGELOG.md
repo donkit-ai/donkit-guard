@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a3] - 2026-09-25
+
+### Added
+
+- `Decision.masked_locations`: the spans behind `masked_segments` (segment, JSON pointer, offsets, class, subtype), so a host can show the person who wrote a text which parts of it the destination did not receive. Empty whenever `masked_segments` is — in observe mode and on a deny.
+
 ## [0.1.0a2] - 2026-09-19
 
 ### Added
@@ -26,5 +32,7 @@ All notable changes to this project are documented here. The format follows
 - `guard-pii` service (`services/pii`, `docker/Dockerfile.pii`): Presidio + spaCy ru/en models + tuned Russian recognizers, per-entity thresholds, a bounded analysis pool, an analyzer failure reported to the core as a detector failure, a non-root image, offline by construction.
 - Documentation: architecture, policy reference, example strict policy, third-party notices.
 
-[Unreleased]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a1...HEAD
+[Unreleased]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a3...HEAD
+[0.1.0a3]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a2...v0.1.0a3
+[0.1.0a2]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a1...v0.1.0a2
 [0.1.0a1]: https://github.com/donkit-ai/donkit-guard/compare/v0.0.1...v0.1.0a1
