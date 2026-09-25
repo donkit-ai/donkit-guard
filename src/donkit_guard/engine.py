@@ -250,6 +250,7 @@ class Engine:
         mask_verdicts = [v for v in verdicts if v.action is RuleAction.MASK]
         mask_spans = [v.span for v in mask_verdicts if v.span is not None]
         masked: dict[str, str] = {}
+        masked_locations: tuple[Location, ...] = ()
         # A mask verdict without a span selects no text, so nothing would be
         # rewritten while the outcome still claims the payload was masked.
         unmaskable = any(v.span is None for v in mask_verdicts)
@@ -261,6 +262,7 @@ class Engine:
                 maskable_arg_paths=descriptor.maskable_args if descriptor else (),
             )
             masked = result.masked
+            masked_locations = result.masked_locations
             if not result.ok:
                 unmaskable = True
                 unmaskable_reason = "a finding inside tool arguments cannot be masked safely"
@@ -293,9 +295,11 @@ class Engine:
             would_block = True
             outcome = Outcome.ALLOW
             masked = {}
+            masked_locations = ()
         if outcome is Outcome.DENY:
             # A payload the host may not send at all carries no usable masks.
             masked = {}
+            masked_locations = ()
         hard = outcome is Outcome.DENY and any(
             v.action is RuleAction.DENY and v.hard for v in enforceable
         )
@@ -333,6 +337,7 @@ class Engine:
             would_block=would_block,
             critical=critical,
             masked_segments=masked,
+            masked_locations=masked_locations,
             display_args_redacted=display_args,
             action_digest=digest,
             context_hash=context_hash,

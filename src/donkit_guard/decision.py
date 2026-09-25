@@ -87,6 +87,10 @@ class Decision(FrozenModel):
     would_block: bool = False
     critical: bool = False
     masked_segments: dict[str, str] = Field(default_factory=dict)
+    # The spans behind ``masked_segments``: which parts of which segment the
+    # destination did not receive, so a host can show that to the person who
+    # wrote the text. Empty whenever ``masked_segments`` is.
+    masked_locations: tuple[Location, ...] = ()
     # Computed once by the engine, which holds the finding spans: a consumer that
     # rebuilt the preview from the arguments alone would print the findings in clear.
     display_args_redacted: dict[str, str] = Field(default_factory=dict)
