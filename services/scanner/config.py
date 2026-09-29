@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import ConfigDict, Field, SecretStr, model_validator
 
 from donkit_guard.scanning.models import Actor, Contract
 
@@ -20,6 +20,8 @@ class Source(Contract):
 
 
 class Configuration(Contract):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     tokens: list[Token] = Field(default_factory=list)
     sources: list[Source] = Field(default_factory=list)
     host_secret: SecretStr = SecretStr("")

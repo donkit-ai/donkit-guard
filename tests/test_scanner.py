@@ -343,3 +343,12 @@ def test_mounted_source_rejects_symlinks_in_parent_directories(tmp_path):
     (tmp_path / "parent-link").symlink_to(tmp_path / "private", target_is_directory=True)
     with pytest.raises(OSError):
         snapshot_directory(tmp_path / "parent-link" / "repo")
+
+
+def test_invalid_configuration_does_not_log_credentials():
+    with pytest.raises(ValidationError) as error:
+        Configuration.model_validate(
+            {"host_secret": "short-private-key", "provider_key": "inference-private-key"}
+        )
+    assert "short-private-key" not in str(error.value)
+    assert "inference-private-key" not in str(error.value)
