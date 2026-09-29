@@ -47,3 +47,10 @@ Contributions are welcome; please read [CONTRIBUTING.md](CONTRIBUTING.md) (DCO s
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Optional Security Scanner
+
+The [Security Scanner extension](docs/security-scanner.md) reviews application source
+using an isolated, pinned OpenHack engine. It supports standalone authentication and
+Donkit employee/project grants, a durable queue and findings with evidence. It runs
+separately from traffic policies and requires its own inference configuration.

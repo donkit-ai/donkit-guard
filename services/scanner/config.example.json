@@ -1,0 +1,11 @@
+{
+  "tokens": [],
+  "sources": [],
+  "host_secret": "",
+  "membership_url": "",
+  "provider_key": "",
+  "provider_url": "https://api.openhack.com/v1",
+  "model": "glm-5.3-flash",
+  "timeout_seconds": 1800,
+  "retention_days": 30
+}
