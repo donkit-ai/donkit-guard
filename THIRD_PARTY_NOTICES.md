@@ -26,3 +26,11 @@ built from it.
 
 `tests/data/*` are corpora assembled for this project; they contain no real
 secrets and no real personal data.
+
+## OpenHack (optional scanner image)
+
+OpenHack, https://github.com/openhackai/OpenHack, MIT license, revision 4e1f532e01c3ecca007e07ff4c06770c1c4a9919. Its license ships in the separately installed scanner distribution. It is not a core Guard dependency.
+
+## Moby seccomp profile
+
+`docker/seccomp-scanner-amd64.json` derives from https://github.com/moby/profiles/blob/a21872828a8e5745d79e2fc1a07ee6dad8aedffa/seccomp/default.json (Apache-2.0; see docker/MOBY-LICENSE). It selects capless amd64 rules and additionally permits clone, clone3, unshare, setns, mount, umount2 and pivot_root for bubblewrap user namespaces.

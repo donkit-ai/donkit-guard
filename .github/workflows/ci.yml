@@ -49,6 +49,8 @@ jobs:
         run: pipx install poetry
       - name: Install
         run: poetry install --no-interaction
+      - name: Scanner service dependencies
+        run: poetry run pip install -r services/scanner/requirements.txt
       - name: Pytest
         run: poetry run pytest
 

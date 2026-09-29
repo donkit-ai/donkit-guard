@@ -1,0 +1,28 @@
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap util-linux git ripgrep ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# The CLI and its interpreter live in a separate, read-only sandbox mount.
+RUN git init /build/openhack \
+    && git -C /build/openhack remote add origin https://github.com/openhackai/OpenHack.git \
+    && git -C /build/openhack fetch --depth 1 origin 4e1f532e01c3ecca007e07ff4c06770c1c4a9919 \
+    && git -C /build/openhack checkout --detach FETCH_HEAD \
+    && python -m venv /opt/engine \
+    && /opt/engine/bin/pip install --no-cache-dir /build/openhack \
+    && rm -rf /build/openhack
+
+COPY pyproject.toml README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md /build/guard/
+COPY src /build/guard/src
+COPY services/scanner/*.py services/scanner/requirements.txt /build/guard/services/scanner/
+RUN python -m venv /opt/service \
+    && /opt/service/bin/pip install --no-cache-dir /build/guard -r /build/guard/services/scanner/requirements.txt \
+    && mkdir -p /app/services /data \
+    && cp -r /build/guard/services/scanner /app/services/scanner \
+    && rm -rf /build/guard \
+    && useradd --uid 10001 --create-home scanner \
+    && chown 10001:10001 /data
+WORKDIR /app
+USER 10001:10001
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+EXPOSE 8090
+CMD ["/opt/service/bin/uvicorn", "services.scanner.app:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]

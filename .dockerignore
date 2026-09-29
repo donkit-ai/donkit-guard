@@ -14,3 +14,7 @@ htmlcov/
 **/__pycache__
 **/*.py[cod]
 *.egg-info/
+
+.env
+.env.*
+scanner.json

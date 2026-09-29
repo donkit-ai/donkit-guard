@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Optional Security Scanner service: tenant/project grants, standalone and Donkit authentication, durable scan queue/audit, bounded source snapshots and isolated OpenHack code review (DON-2539). See `docs/security-scanner.md`. Source is sent to the configured inference provider; production credentials are not inherited.
+
 ## [0.1.0a3] - 2026-09-25
 
 ### Added
