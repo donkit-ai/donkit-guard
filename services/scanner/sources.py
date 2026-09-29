@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import os
 import stat
+from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from pydantic import ValidationError
 
@@ -46,18 +51,46 @@ EXTENSIONS = {
 }
 
 
+@contextmanager
+def source_root(path: Path) -> Iterator[int]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Source root must be an absolute path without parent traversal")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def walk_error(error: OSError) -> None:
+    raise error
+
+
 def snapshot_directory(path: Path) -> Snapshot:
     """Export text source, opening each file relative to a non-following directory fd."""
+    with source_root(path) as root_fd:
+        return capture_directory(root_fd)
+
+
+def capture_directory(root_fd: int) -> Snapshot:
     files: list[SourceFile] = []
     size = 0
-    if path.is_symlink() or not path.is_dir():
-        raise ValueError("Source root must be an existing directory, not a symlink")
-    for root, directories, names, fd in os.fwalk(path, follow_symlinks=False):
+    for root, directories, names, fd in os.fwalk(
+        ".", dir_fd=root_fd, follow_symlinks=False, onerror=walk_error
+    ):
         directories[:] = sorted(
-            d for d in directories if d.lower() not in EXCLUDED and not Path(root, d).is_symlink()
+            d
+            for d in directories
+            if d.lower() not in EXCLUDED
+            and not stat.S_ISLNK(os.stat(d, dir_fd=fd, follow_symlinks=False).st_mode)
         )
         for name in sorted(names):
-            relative = str(Path(root, name).relative_to(path))
+            relative = str(Path(root, name))
             if Path(name).suffix.lower() not in EXTENSIONS and name not in (
                 "Dockerfile",
                 "Makefile",
@@ -74,6 +107,8 @@ def snapshot_directory(path: Path) -> Snapshot:
                 raise ValueError(f"Source file exceeds 1 MB: {relative}")
             source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             with os.fdopen(source_fd, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ValueError("Source was replaced by a non-regular file")
                 raw = source.read(1_000_001)
             if len(raw) > 1_000_000:
                 raise ValueError("Source file changed while exporting")

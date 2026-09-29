@@ -334,3 +334,12 @@ def test_host_identity_cannot_be_forged_or_replayed(setup, monkeypatch):
 def test_multibyte_source_limit_is_measured_in_bytes():
     with pytest.raises(ValidationError, match="1 MB"):
         SourceFile(path="large.py", content="€" * 334_000)
+
+
+def test_mounted_source_rejects_symlinks_in_parent_directories(tmp_path):
+    real = tmp_path / "private" / "repo"
+    real.mkdir(parents=True)
+    (real / "config.json").write_text('{"secret":"must not export"}')
+    (tmp_path / "parent-link").symlink_to(tmp_path / "private", target_is_directory=True)
+    with pytest.raises(OSError):
+        snapshot_directory(tmp_path / "parent-link" / "repo")
