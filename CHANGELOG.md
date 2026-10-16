@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a4] - 2026-10-16
+
+### Added
+
+- Declared detectors: a policy document can carry a `detectors:` section with `pattern` detectors (RE2 patterns with an optional checksum, one of `luhn`, `inn`, `snils`, `ogrn` and `iban`, context and exclude words, and JSON-key globs), `terms` detectors (word lists matched as whole words whatever the case and the Latin/Cyrillic look-alike letters, with `*` standing for any ending) and `remote` detectors (a service that speaks the analyze contract, with its entity types mapped to a class and subtype). A document is checked when it is loaded: patterns have to compile, the `match` and `no_match` examples of a declaration have to hold, an endpoint carries no credentials, and a document has at most 20 detectors, 3 of them remote. `DeclaredDetectors` builds the detectors per tenant and keeps them per tenant and declaration; a declared detector is named `declared:<id>`, and its cached results are scoped to the tenant and to the digest of its declaration. See `docs/detectors.md`.
+- Per-call detector selection (`donkit_guard.selection`): a detector runs only when a rule that matched the context could use its findings, judged from its classes and subtypes against `finding_class` and `finding_subtype`. It runs synchronously when a rule with an action other than `audit` could use it, and in the background when only `audit` rules could.
+- Background checks: the detectors that only `audit` rules can use scan while the decision goes back, and what they find is recorded afterwards as a `FindingsEvent` under the decision's `decision_id`. `Decision.unchecked_detectors` lists the detectors whose findings a decision did not get. An approval card waits for its background detectors and, when one failed, hides every argument value. `EngineSettings.max_background_checks` (200) bounds the checks in flight, `Engine.drain()` waits for them and `Engine.aclose()` gives them `EngineSettings.background_drain_s` (5 seconds). The findings of a check that has not finished when the process ends are lost.
+- The analyze contract is public: `docs/remote-detectors.md`, the OpenAPI file `docs/contract/analyze-v1.openapi.json` (generated from the models by `scripts/gen_contract.py`, which CI runs with `--check`), a conformance check (`python -m donkit_guard.conformance <url>` and `check_service`) and an example service in `examples/remote-detector`.
+- `donkit_guard.http.HttpAnalyzeClient`, a hardened client for the analyze contract: no proxy or certificate settings from the environment, no redirects, `verify` for a private CA, a cap on the size of the answer, and every failure returned as a failed response instead of raised.
+- Host hooks for remote detectors: `CredentialResolver` (default `EnvCredentialResolver`, which reads `DONKIT_GUARD_CREDENTIAL_<NAME>`) turns the credential name of a declaration into a token, and `EndpointGuard` (default `AllowAllEndpoints`) refuses an address by raising `EndpointRejected`. Both are exported from the package root together with `DeclaredDetectors`, and `build_quickstart_guard` takes a `declared` argument.
+- Optional extras `re2` (`google-re2`, for pattern and terms detectors) and `http` (`httpx`, for remote detectors and the HTTP client). The base dependencies are unchanged, and importing `donkit_guard` needs neither.
+- Optional detector attributes, read through accessors in `donkit_guard.detectors.base`: `subtypes`, `cache_scope`, `timeout_ms`, `cache_ttl_s` and `required` (`False` makes a failure count as an unchecked detector instead of a failed check). `DetectorResultCache.put` takes a lifetime per entry.
+- `Segment.key()`, the JSON key a leaf sits under, and `redact_display_args(..., redact_all=True)`, which blacks out every value.
+- Documentation: `docs/detectors.md`, `docs/remote-detectors.md` and the example policy `examples/policies/tenant-detectors.yaml`.
+
+### Changed
+
+- `AnalyzeSegment.lang` is `str | None` (it was `"ru"` or `"en"`, defaulting to `"en"`): any language code is allowed, and the `guard-pii` service analyzes a code it does not know, or none, as English.
+- `AnalyzeResponse` and `AnalyzeSpan` ignore fields they do not know, so a service can extend its answer without breaking its callers.
+- `Decision.detector_versions` lists the detectors selected for the call instead of every configured detector, and a detector that no matching rule can use is no longer run. `DetectorRunner.run` and `DetectorRunner.versions` accept a set of detectors, `DetectorRunner.detectors` is public, and a remote detector that declares `timeout_ms` is given that deadline.
+- A failure of a detector that only `audit` rules can use no longer fails the decision: in enforce mode it was a deny with the code `detector_unavailable`, and it is now listed in `Decision.unchecked_detectors`.
+- In observe mode `Engine.evaluate` answers at once with an `allow` whose explanation code is `observe_deferred`, and records the full decision afterwards under the same `decision_id`. Pass `defer=False` to evaluate before returning, as before.
+- `AuditEvent` also includes `FindingsEvent`: an `AuditSink` that handles events by type has to accept `findings`.
+
+### Fixed
+
+- `Decision.masked_locations` is cleared together with `masked_segments` when an approval outcome turns a decision into a deny and when a failed audit write does (`audit_unavailable`), so it is empty whenever `masked_segments` is.
+
 ## [0.1.0a3] - 2026-09-25
 
 ### Added
@@ -32,7 +60,8 @@ All notable changes to this project are documented here. The format follows
 - `guard-pii` service (`services/pii`, `docker/Dockerfile.pii`): Presidio + spaCy ru/en models + tuned Russian recognizers, per-entity thresholds, a bounded analysis pool, an analyzer failure reported to the core as a detector failure, a non-root image, offline by construction.
 - Documentation: architecture, policy reference, example strict policy, third-party notices.
 
-[Unreleased]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a3...HEAD
+[Unreleased]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a4...HEAD
+[0.1.0a4]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a3...v0.1.0a4
 [0.1.0a3]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a2...v0.1.0a3
 [0.1.0a2]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a1...v0.1.0a2
 [0.1.0a1]: https://github.com/donkit-ai/donkit-guard/compare/v0.0.1...v0.1.0a1

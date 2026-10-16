@@ -26,8 +26,10 @@ def with_outcome(
     )
     update: dict[str, object] = {"outcome": outcome, "explanation": explanation, "critical": True}
     if outcome is Outcome.DENY:
-        # A denied payload is never forwarded, so it must not look maskable either.
+        # A denied payload is never forwarded, so it must not look maskable either:
+        # the masked text and the spans that explain it go together.
         update["masked_segments"] = {}
+        update["masked_locations"] = ()
     update.update(extra)
     return decision.model_copy(update=update)
 

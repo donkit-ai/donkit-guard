@@ -57,6 +57,23 @@ def test_redact_display_args_leaves_no_marker_when_everything_fits() -> None:
     assert redact_display_args(args, [], None, max_entries=2) == {"/rows/0": "a", "/rows/1": "b"}
 
 
+def test_redact_all_hides_every_value() -> None:
+    # No span is given: the point is that a value needs no finding to be hidden.
+    args = {"token": "sk-live-ABCDEF123456", "note": "x" * 400, "empty": "", "count": 3}
+    assert redact_display_args(args, [], None, limit=64, redact_all=True) == {
+        "/token": "█" * 20,
+        "/note": "█" * 64,
+        "/empty": "█",
+        "/count": "█",
+    }
+    rows = {"rows": [f"row-{i}" for i in range(5)]}
+    assert redact_display_args(rows, [], None, max_entries=2, redact_all=True) == {
+        "/rows/0": "█" * 5,
+        "/rows/1": "█" * 5,
+        "truncated": "3 more argument fields not shown",
+    }
+
+
 def test_events_serialize(tool_context: GuardContext) -> None:
     decision = Decision(
         outcome=Outcome.DENY,

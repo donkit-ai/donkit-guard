@@ -1,4 +1,4 @@
-"""Policy documents: versioned layers of attribute-matching rules."""
+"""Policy documents: versioned layers of attribute-matching rules and declared detectors."""
 
 from __future__ import annotations
 
@@ -22,6 +22,13 @@ from donkit_guard.context import (
     PrincipalKind,
 )
 from donkit_guard.decision import PolicyMode
+from donkit_guard.declared.spec import (
+    MAX_DETECTORS,
+    MAX_REMOTE_DETECTORS,
+    DetectorSpec,
+    RemoteDetectorSpec,
+)
+from donkit_guard.declared.validation import validate_specs
 from donkit_guard.errors import PolicyError
 from donkit_guard.findings import ENFORCEABLE_CLASSES, FindingClass, FindingSpan
 from donkit_guard.payload import Segment, SegmentTrust
@@ -171,6 +178,7 @@ class PolicyDocument(FrozenModel):
     approval_ttl_s: int = Field(default=300, ge=1)
     segment_limit_bytes: int = Field(default=262144, ge=1024)
     layers: tuple[PolicyLayer, ...] = ()
+    detectors: tuple[DetectorSpec, ...] = ()
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -185,6 +193,29 @@ class PolicyDocument(FrozenModel):
             if rule.id in seen:
                 raise ValueError(f"duplicate rule id {rule.id!r}")
             seen.add(rule.id)
+        return self
+
+    @model_validator(mode="after")
+    def _detectors_are_sound(self) -> PolicyDocument:
+        if len(self.detectors) > MAX_DETECTORS:
+            raise ValueError(
+                f"at most {MAX_DETECTORS} detectors per document, got {len(self.detectors)}"
+            )
+        remote = sum(isinstance(spec, RemoteDetectorSpec) for spec in self.detectors)
+        if remote > MAX_REMOTE_DETECTORS:
+            raise ValueError(
+                f"at most {MAX_REMOTE_DETECTORS} remote detectors per document, got {remote}"
+            )
+        seen: set[str] = set()
+        for spec in self.detectors:
+            if spec.id in seen:
+                raise ValueError(f"duplicate detector id {spec.id!r}")
+            seen.add(spec.id)
+        # A pattern RE2 refuses and an example its detector contradicts only show once the
+        # detectors are built, so loading builds them: a document whose detectors would not
+        # work is refused here, with the place of every problem.
+        if errors := validate_specs(self.detectors):
+            raise ValueError("\n".join(errors))
         return self
 
     def iter_rules(self) -> Iterator[tuple[str, Rule]]:
@@ -217,6 +248,8 @@ class PolicyBundle(FrozenModel):
         included: a tenant layer composed on top of a platform layer must not be
         able to switch the platform's enforcement off. A caller that wants a
         different mode (a staged rollout, say) passes one explicitly.
+
+        A rule id or a detector id that two documents share is an error.
         """
         if not documents:
             raise PolicyError("a policy bundle needs at least one document")
@@ -228,6 +261,14 @@ class PolicyBundle(FrozenModel):
                         f"duplicate rule id {rule.id!r} across the documents of a bundle"
                     )
                 seen.add(rule.id)
+        seen_detectors: set[str] = set()
+        for document in documents:
+            for spec in document.detectors:
+                if spec.id in seen_detectors:
+                    raise PolicyError(
+                        f"duplicate detector id {spec.id!r} across the documents of a bundle"
+                    )
+                seen_detectors.add(spec.id)
         if mode is None:
             mode = max((d.mode for d in documents), key=MODE_STRICTNESS.__getitem__)
         version = "+".join(d.version for d in documents)
@@ -248,6 +289,11 @@ class PolicyBundle(FrozenModel):
     @property
     def segment_limit_bytes(self) -> int:
         return min(d.segment_limit_bytes for d in self.documents)
+
+    @property
+    def detectors(self) -> tuple[DetectorSpec, ...]:
+        """The detectors the documents declare, in document order."""
+        return tuple(spec for document in self.documents for spec in document.detectors)
 
     def iter_rules(self) -> Iterator[tuple[str, Rule]]:
         for document in self.documents:

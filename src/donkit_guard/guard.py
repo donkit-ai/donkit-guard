@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from donkit_guard.adapters import DetectorClient
     from donkit_guard.approvals import ApprovalDecisionValue, ApprovalRecord
     from donkit_guard.context import GuardContext
+    from donkit_guard.declared import DeclaredDetectors
     from donkit_guard.payload import Payload
 
 
@@ -68,9 +69,10 @@ class Guard:
         ttl_s = await self.engine.approval_ttl(ctx)
 
         async def reevaluate() -> Decision:
-            # A freshness check on the policy, not a second decision to audit.
+            # A freshness check on the policy, not a second decision to audit: it runs every
+            # detector it needs before it answers and leaves no background work behind.
             return await self.engine.evaluate(
-                ctx, payload, seen_segments=seen_segments, audit=False
+                ctx, payload, seen_segments=seen_segments, audit=False, defer=False
             )
 
         resolved = await self.approvals.resolve(
@@ -105,8 +107,14 @@ def build_quickstart_guard(
     mode: PolicyMode = PolicyMode.OBSERVE,
     ner_client: DetectorClient | None = None,
     decider: Callable[[ApprovalRecord], ApprovalDecisionValue | None] | None = None,
+    declared: DeclaredDetectors | None = None,
 ) -> Guard:
-    """Default policy, in-memory adapters, synchronous detectors: enough to try the guard in a REPL."""
+    """Default policy, in-memory adapters, synchronous detectors: enough to try the guard in a REPL.
+
+    ``declared`` builds the detectors that policy documents declare. Pass one to give them the
+    host's own credential resolver, endpoint guard or CA bundle; by default the engine makes
+    its own.
+    """
     detectors: list[SecretsDetector | PiiChecksumDetector | InjectionHeuristic | PiiNerDetector] = [
         SecretsDetector(),
         PiiChecksumDetector(),
@@ -118,6 +126,7 @@ def build_quickstart_guard(
         policy_source=InMemoryPolicySource(default_bundle(mode)),
         runner=DetectorRunner(detectors, executor=ExecutorKind.SYNC),
         audit_sink=InMemoryAuditSink(),
+        declared=declared,
     )
     store = InMemoryApprovalStore()
     channel = (

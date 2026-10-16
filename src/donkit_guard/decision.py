@@ -97,6 +97,11 @@ class Decision(FrozenModel):
     approval: ApprovalPending | None = None
     action_digest: str | None = None
     context_hash: str
+    # Detectors (``name@version``) whose findings this decision did not get: one
+    # that failed or ran out of time where the policy lets the call go on without
+    # it, or one that was skipped because no capacity was left. Whoever reads the
+    # audit trail must not take the missing findings for a clean payload.
+    unchecked_detectors: tuple[str, ...] = ()
 
     def is_allowed(self) -> bool:
         return self.outcome in (Outcome.ALLOW, Outcome.MASK)

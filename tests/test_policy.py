@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from donkit_guard.context import (
@@ -16,6 +19,7 @@ from donkit_guard.context import (
     RunRef,
 )
 from donkit_guard.decision import PolicyMode
+from donkit_guard.declared.regex import RE2_MISSING, re2_available
 from donkit_guard.errors import PolicyError
 from donkit_guard.findings import ENFORCEABLE_CLASSES, SIGNAL_CLASSES, FindingClass, FindingSpan
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
@@ -40,6 +44,51 @@ layers:
         match: {action_kind: [tool_call], tool: ["delete_*"]}
         action: require_approval
 """
+
+# Pattern and terms detectors need the "re2" extra. CI installs every extra; a bare install
+# reports the cases it cannot run as skipped.
+needs_re2 = pytest.mark.skipif(not re2_available(), reason=RE2_MISSING)
+
+ENDPOINT = "https://detector.example.com/v1/analyze"
+NUMBER = r"CN-\d{6}"
+
+
+def _pattern(detector_id: str = "contract-number", **fields: Any) -> dict[str, Any]:
+    return {
+        "kind": "pattern",
+        "id": detector_id,
+        "title": "Contract number",
+        "class": "corporate",
+        "subtype": "CONTRACT_NUMBER",
+        **fields,
+    }
+
+
+def _terms(detector_id: str = "code-names", **fields: Any) -> dict[str, Any]:
+    return {
+        "kind": "terms",
+        "id": detector_id,
+        "title": "Project code names",
+        "class": "corporate",
+        "subtype": "CODE_NAME",
+        "terms": ["Albatross"],
+        **fields,
+    }
+
+
+def _remote(detector_id: str = "pii-service", **fields: Any) -> dict[str, Any]:
+    return {
+        "kind": "remote",
+        "id": detector_id,
+        "title": "Personal data service",
+        "endpoint": ENDPOINT,
+        "entities": {"PERSON": {"class": "pii", "subtype": "PERSON"}},
+        **fields,
+    }
+
+
+def _document(*detectors: dict[str, Any], version: str = "d-1") -> str:
+    return yaml.safe_dump({"version": version, "detectors": list(detectors)})
 
 
 def test_load_policy_parses_yaml_and_iterates_rules() -> None:
@@ -285,7 +334,92 @@ def test_compose_rejects_a_rule_id_shared_by_two_documents() -> None:
     assert PolicyBundle.compose([first]).version == "a"
 
 
+def test_compose_rejects_duplicate_detector_ids() -> None:
+    # Each document is sound on its own; only the bundle repeats an id.
+    first = load_policy(_document(_pattern("shared", json_keys=["contract"]), version="a"))
+    second = load_policy(_document(_remote("shared"), version="b"))
+
+    with pytest.raises(PolicyError, match="duplicate detector id 'shared' across the documents"):
+        PolicyBundle.compose([first, second])
+    assert [spec.id for spec in PolicyBundle.compose([first]).detectors] == ["shared"]
+
+
 def test_rule_defaults() -> None:
     rule = Rule(id="x", action=RuleAction.ALLOW)
     assert rule.match.needs_findings() is False
     assert rule.hard is False
+
+
+@needs_re2
+def test_bundle_lists_the_detectors_of_every_document() -> None:
+    platform = load_policy(
+        _document(
+            _pattern(
+                patterns=[NUMBER],
+                examples={"match": ["contract CN-123456"], "no_match": ["CN-12345"]},
+            ),
+            _terms(examples={"match": ["project Albatross"]}),
+            version="platform",
+        )
+    )
+    quiet = load_policy("version: quiet\nlayers: []\n")
+    tenant = load_policy(_document(_remote(), version="tenant"))
+
+    bundle = PolicyBundle.compose([platform, quiet, tenant])
+
+    assert [(spec.kind, spec.id) for spec in bundle.detectors] == [
+        ("pattern", "contract-number"),
+        ("terms", "code-names"),
+        ("remote", "pii-service"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        pytest.param(
+            _document(*(_pattern(f"keys-{n}", json_keys=["contract"]) for n in range(21))),
+            "at most 20 detectors per document, got 21",
+            id="more-than-twenty-detectors",
+        ),
+        pytest.param(
+            _document(*(_remote(f"service-{n}") for n in range(4))),
+            "at most 3 remote detectors per document, got 4",
+            id="more-than-three-remote-detectors",
+        ),
+        pytest.param(
+            _document(_pattern("shared", json_keys=["contract"]), _remote("shared")),
+            "duplicate detector id 'shared'",
+            id="duplicate-id-within-a-document",
+        ),
+        pytest.param(
+            _document(_pattern(patterns=[r"(?<=CN-)\d{6}"])),
+            "detectors/0/patterns/0",
+            id="lookbehind-pattern",
+            marks=needs_re2,
+        ),
+        pytest.param(
+            _document(_pattern(patterns=[NUMBER], examples={"match": ["no number here"]})),
+            "detectors/0/examples/match/0: found nothing",
+            id="match-example-that-finds-nothing",
+            marks=needs_re2,
+        ),
+        pytest.param(
+            _document(
+                _pattern(patterns=[r"(?<=CN-)\d{6}"]),
+                _pattern("other-number", patterns=[NUMBER], examples={"match": ["none"]}),
+            ),
+            "(?s)detectors/0/patterns/0.*detectors/1/examples/match/0: found nothing",
+            id="every-problem-is-reported",
+            marks=needs_re2,
+        ),
+        pytest.param(
+            _document(_remote(endpoint=f"{ENDPOINT}?token=secret")),
+            "endpoint must not carry",
+            id="endpoint-with-a-query",
+        ),
+    ],
+)
+def test_detectors_section(text: str, message: str) -> None:
+    with pytest.raises(PolicyError, match=message):
+        load_policy(text)

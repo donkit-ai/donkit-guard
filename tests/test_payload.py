@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from donkit_guard.payload import (
     Payload,
     Segment,
@@ -105,6 +107,26 @@ def test_hashlike_detects_digest_fields() -> None:
     assert digest.hashlike() is True
     assert plain.hashlike() is False
     assert whole.hashlike() is False
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("", ""),
+        ("/contract_id", "contract_id"),
+        ("/client/contract_id", "contract_id"),
+        ("/ids/0", "ids"),
+        ("/items/0/1", "items"),
+        ("/a~1b", "a/b"),
+        ("/0", ""),
+        ("/²", "²"),  # superscript two is a Unicode digit, not an array index
+    ],
+)
+def test_segment_key(path: str, expected: str) -> None:
+    segment = Segment.of_text(
+        "value", source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED, path=path
+    )
+    assert segment.key() == expected
 
 
 def test_json_pointer_roundtrip() -> None:

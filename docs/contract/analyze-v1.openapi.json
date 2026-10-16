@@ -1,0 +1,202 @@
+{
+  "components": {
+    "schemas": {
+      "AnalyzeRequest": {
+        "additionalProperties": false,
+        "description": "The body of ``POST /v1/analyze``: the segments to inspect and how long to wait.\n\nA service that cannot finish within ``deadline_ms`` answers ``failed: true`` instead\nof keeping the caller waiting.",
+        "properties": {
+          "deadline_ms": {
+            "default": 2000,
+            "maximum": 60000,
+            "minimum": 1,
+            "title": "Deadline Ms",
+            "type": "integer"
+          },
+          "segments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AnalyzeSegment"
+            },
+            "title": "Segments",
+            "type": "array"
+          }
+        },
+        "title": "AnalyzeRequest",
+        "type": "object"
+      },
+      "AnalyzeResponse": {
+        "description": "The answer to ``POST /v1/analyze``.\n\nAn empty ``spans`` means the text was analyzed and nothing was found. A service that\ncannot answer, or cannot answer in time, returns ``failed: true`` with a short\n``error``; it must not pass an empty ``spans`` off as a clean result. A field a\nservice adds beyond these is ignored, so a service can extend its answer without\nbreaking its callers.",
+        "properties": {
+          "detector": {
+            "default": "pii-ner",
+            "title": "Detector",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "failed": {
+            "default": false,
+            "title": "Failed",
+            "type": "boolean"
+          },
+          "spans": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AnalyzeSpan"
+            },
+            "title": "Spans",
+            "type": "array"
+          },
+          "version": {
+            "default": "1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "title": "AnalyzeResponse",
+        "type": "object"
+      },
+      "AnalyzeSegment": {
+        "additionalProperties": false,
+        "description": "A piece of text to analyze.\n\n``id`` is opaque to the service and comes back as ``AnalyzeSpan.segment_id``.\n``lang`` is a language hint: any language code the caller has, or ``None`` when it\ndoes not know the language. The service decides which codes it supports.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lang"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text"
+        ],
+        "title": "AnalyzeSegment",
+        "type": "object"
+      },
+      "AnalyzeSpan": {
+        "description": "One finding inside a segment of the request.\n\n``start`` and ``end`` are offsets into the text of the segment named by\n``segment_id``. They count Unicode code points, as a Python ``str`` index does, and\n``end`` is exclusive. ``score`` is a confidence between 0 and 1. A field a service\nadds beyond these is ignored, so a service can extend its answer without breaking\nits callers.",
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "integer"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "start": {
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "segment_id",
+          "start",
+          "end",
+          "entity_type",
+          "score"
+        ],
+        "title": "AnalyzeSpan",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "Optional. A service that requires a token expects it as `Authorization: Bearer <token>`.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "What a service that finds entities in text answers to a remote detector. Anyone can implement it and point a policy document at it. Generated from the models in donkit_guard.adapters by scripts/gen_contract.py: change the models, not this file.",
+    "title": "donkit-guard analyze contract",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "description": "Optional. A service may expose it so that orchestrators and operators can see that it is up. The analyze contract does not depend on it, and its body is not specified.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "The service is up. The body can be anything."
+          }
+        },
+        "summary": "Check that the service is up (optional)"
+      }
+    },
+    "/v1/analyze": {
+      "post": {
+        "description": "Finds entities in each segment of the request and reports each as a span. Offsets count Unicode code points into the text of the segment the span names, as a Python `str` index does, and `end` is exclusive. A service that cannot answer within `deadline_ms` answers `failed: true` with a short `error` instead of keeping the caller waiting, and never passes an empty `spans` off as a clean result; the spans of a failed answer are ignored. A field the service adds to its answer beyond those listed is ignored.",
+        "operationId": "analyze",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeResponse"
+                }
+              }
+            },
+            "description": "The segments were analyzed, or the service reports with `failed: true` that it could not analyze them."
+          },
+          "default": {
+            "description": "Any other status. The caller treats the call as failed and does not read the body."
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Find entities in text"
+      }
+    }
+  }
+}

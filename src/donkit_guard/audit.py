@@ -1,4 +1,4 @@
-"""Audit events: what was decided and what actually happened, without raw secrets or prompts."""
+"""Audit events: decisions, their executions and late findings, without raw secrets or prompts."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import Field
 
 from donkit_guard.context import FrozenModel, GuardContext
-from donkit_guard.decision import Decision
+from donkit_guard.decision import Decision, Location
+from donkit_guard.findings import FindingClass
 from donkit_guard.payload import Payload, iter_json_leaves
 
 if TYPE_CHECKING:
@@ -56,7 +57,27 @@ class ExecutionEvent(FrozenModel):
     occurred_at: datetime
 
 
-AuditEvent = DecisionEvent | ExecutionEvent
+class FindingsEvent(FrozenModel):
+    """Findings that finished after the decision, linked to it by ``decision_id``.
+
+    A detector that no deny, mask or approval rule can use runs in the
+    background, so the decision does not wait for it; whatever it found is
+    written here once it is done. ``rule_ids`` are the audit rules the findings
+    matched. ``unchecked_detectors`` are the detectors that failed, so what they
+    did not flag is unknown rather than clean.
+    """
+
+    event_type: Literal["findings"] = "findings"
+    decision_id: str
+    context: ContextSummary
+    locations: tuple[Location, ...] = ()
+    finding_classes: tuple[FindingClass, ...] = ()
+    rule_ids: tuple[str, ...] = ()
+    unchecked_detectors: tuple[str, ...] = ()
+    occurred_at: datetime
+
+
+AuditEvent = DecisionEvent | ExecutionEvent | FindingsEvent
 
 
 def summarize_context(ctx: GuardContext) -> ContextSummary:
@@ -100,6 +121,7 @@ def redact_display_args(
     *,
     limit: int = DISPLAY_ARG_LIMIT,
     max_entries: int = DISPLAY_ARG_ENTRIES,
+    redact_all: bool = False,
 ) -> dict[str, str]:
     """Argument previews for approval cards and audit rows.
 
@@ -108,11 +130,15 @@ def redact_display_args(
     reproduce a secret the detectors found. The number of previews is capped as
     well: a tool called with a large array would otherwise write one entry per
     element into every audit row and approval record.
+
+    ``redact_all`` is for a caller that cannot tell which values hold findings,
+    because a detector did not finish: the spans are not consulted and every
+    value is blacked out whole, keeping only its length, capped at ``limit``.
     """
     if not arguments:
         return {}
     by_path: dict[str, list[tuple[int, int]]] = {}
-    if payload is not None:
+    if payload is not None and not redact_all:
         segments = payload.by_id()
         for span in spans:
             segment = segments.get(span.segment_id)
@@ -126,8 +152,11 @@ def redact_display_args(
             previews[TRUNCATED_KEY] = f"{remaining} more argument fields not shown"
             break
         text = leaf if isinstance(leaf, str) else str(leaf)
-        text = _mask_ranges(text, by_path.get(pointer, []))
-        if len(text) > limit:
-            text = text[: limit - 1] + "…"
+        if redact_all:
+            text = "█" * max(1, min(len(text), limit))
+        else:
+            text = _mask_ranges(text, by_path.get(pointer, []))
+            if len(text) > limit:
+                text = text[: limit - 1] + "…"
         previews[pointer] = text
     return previews

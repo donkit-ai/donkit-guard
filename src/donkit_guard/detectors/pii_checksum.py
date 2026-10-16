@@ -8,75 +8,20 @@ from re import Pattern
 from typing import TYPE_CHECKING
 
 from donkit_guard.detectors.base import register_detector, spans_overlap
+from donkit_guard.detectors.checksums import (
+    digits_of,
+    valid_inn,
+    valid_luhn,
+    valid_ogrn,
+    valid_snils,
+)
+from donkit_guard.detectors.context import CONTEXT_WINDOW, has_context, word_pattern
 from donkit_guard.findings import FindingClass, Findings, FindingSpan
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from donkit_guard.payload import Segment
-
-_DIGITS = re.compile(r"\D+")
-
-
-def _digits(text: str) -> str:
-    return _DIGITS.sub("", text)
-
-
-def valid_snils(digits: str) -> bool:
-    if len(digits) != 11 or not digits.isdigit() or int(digits[:9]) <= 1001998:
-        return False
-    total = sum(int(d) * (9 - i) for i, d in enumerate(digits[:9]))
-    if total < 100:
-        check = total
-    elif total in (100, 101):
-        check = 0
-    else:
-        check = total % 101
-        if check == 100:
-            check = 0
-    return check == int(digits[9:])
-
-
-def valid_inn(digits: str) -> bool:
-    if not digits.isdigit():
-        return False
-    if len(digits) == 10:
-        weights = (2, 4, 10, 3, 5, 9, 4, 6, 8)
-        return sum(int(d) * w for d, w in zip(digits[:9], weights, strict=True)) % 11 % 10 == int(
-            digits[9]
-        )
-    if len(digits) == 12:
-        w11 = (7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
-        w12 = (3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8)
-        n11 = sum(int(d) * w for d, w in zip(digits[:10], w11, strict=True)) % 11 % 10
-        n12 = sum(int(d) * w for d, w in zip(digits[:11], w12, strict=True)) % 11 % 10
-        return n11 == int(digits[10]) and n12 == int(digits[11])
-    return False
-
-
-def valid_ogrn(digits: str) -> bool:
-    if not digits.isdigit():
-        return False
-    if len(digits) == 13:
-        return int(digits[:12]) % 11 % 10 == int(digits[12])
-    if len(digits) == 15:
-        return int(digits[:14]) % 13 % 10 == int(digits[14])
-    return False
-
-
-def valid_luhn(digits: str) -> bool:
-    if not digits.isdigit() or not 13 <= len(digits) <= 19:
-        return False
-    total = 0
-    for index, char in enumerate(reversed(digits)):
-        value = int(char)
-        if index % 2 == 1:
-            value *= 2
-            if value > 9:
-                value -= 9
-        total += value
-    return total % 10 == 0
-
 
 # Issuer identification ranges in use today, as (prefix length, low, high).
 _ISSUER_PREFIXES: tuple[tuple[int, int, int], ...] = (
@@ -146,57 +91,34 @@ _PATTERNS: tuple[tuple[str, Pattern[str]], ...] = (
     ("PASSPORT", re.compile(r"\b\d{2}\s?\d{2}\s*(?:№|номер|n)?\s*\d{6}\b", re.IGNORECASE)),
 )
 
-# A letter in any script: the boundary for context words, so "inner", "winner", "syntax"
-# or "инновации" do not vouch for a number while "INN7707123458" and "ИНН:" still do.
-_LETTER = r"[^\W\d_]"
-
-
-def _words(*forms: str) -> str:
-    """Alternation of context words bounded by non-letters; a trailing `*` allows suffixes."""
-    parts: list[str] = []
-    for form in forms:
-        if form.endswith("*"):
-            parts.append(f"(?<!{_LETTER}){form[:-1]}")
-        else:
-            parts.append(f"(?<!{_LETTER}){form}(?!{_LETTER})")
-    return "|".join(parts)
-
-
 _CONTEXT: dict[str, Pattern[str]] = {
-    "SNILS": re.compile(_words("снилс", "snils"), re.IGNORECASE),
-    "INN": re.compile(
-        _words("инн", "inn", "налог*", "tax", "taxes", "taxpayer", "taxation"), re.IGNORECASE
-    ),
-    "OGRN": re.compile(_words("огрн", "огрнип", "ogrn", "ogrnip"), re.IGNORECASE),
-    "PASSPORT": re.compile(_words("паспорт*", "серия", "номер", "passport"), re.IGNORECASE),
+    "SNILS": word_pattern(["снилс", "snils"]),
+    "INN": word_pattern(["инн", "inn", "налог*", "tax", "taxes", "taxpayer", "taxation"]),
+    "OGRN": word_pattern(["огрн", "огрнип", "ogrn", "ogrnip"]),
+    "PASSPORT": word_pattern(["паспорт*", "серия", "номер", "passport"]),
 }
-_CONTEXT_WINDOW = 40
 
 _VALIDATORS = {"SNILS": valid_snils, "INN": valid_inn, "OGRN": valid_ogrn}
-
-
-def _has_context(text: str, start: int, end: int, subtype: str) -> bool:
-    window = text[max(0, start - _CONTEXT_WINDOW) : min(len(text), end + _CONTEXT_WINDOW)]
-    return _CONTEXT[subtype].search(window) is not None
 
 
 def _score_match(subtype: str, text: str, match: re.Match[str]) -> float | None:
     """The score of a candidate, or None when it is not reported at all."""
     raw = match.group(0)
-    digits = _digits(raw)
+    digits = digits_of(raw)
+    start, end = match.span()
     confident = SCORES[subtype]
     if subtype == "CREDIT_CARD":
         if valid_luhn(digits) and _issuer_prefix(digits) and _one_separator(raw):
             return confident
         return None
     if subtype == "PASSPORT":
-        return confident if _has_context(text, match.start(), match.end(), subtype) else None
+        return confident if has_context(text, start, end, _CONTEXT[subtype]) else None
     validator = _VALIDATORS.get(subtype)
     if validator is None:
         return confident
     if not validator(digits):
         return None
-    if _has_context(text, match.start(), match.end(), subtype):
+    if has_context(text, start, end, _CONTEXT[subtype]):
         return confident
     # The canonical written form of a SNILS is a format nothing else shares.
     if subtype == "SNILS" and raw != digits:
@@ -208,7 +130,7 @@ def _pattern_set_hash() -> str:
     material = "|".join(f"{subtype}:{pattern.pattern}" for subtype, pattern in _PATTERNS)
     material += "|" + "|".join(f"{key}:{value.pattern}" for key, value in sorted(_CONTEXT.items()))
     material += "|" + "|".join(f"{key}={value}" for key, value in sorted(SCORES.items()))
-    material += f"|context_free={SCORE_CONTEXT_FREE}|window={_CONTEXT_WINDOW}"
+    material += f"|context_free={SCORE_CONTEXT_FREE}|window={CONTEXT_WINDOW}"
     material += "|" + ",".join(f"{n}:{lo}-{hi}" for n, lo, hi in _ISSUER_PREFIXES)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
 

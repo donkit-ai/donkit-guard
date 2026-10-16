@@ -9,6 +9,12 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
+from donkit_guard.adapters import (
+    AllowAllEndpoints,
+    CredentialResolver,
+    EndpointGuard,
+    EnvCredentialResolver,
+)
 from donkit_guard.approval_flow import ApprovalFlow
 from donkit_guard.approvals import ApprovalDecisionValue, ApprovalRecord
 from donkit_guard.context import (
@@ -27,6 +33,7 @@ from donkit_guard.context import (
     Tenant,
 )
 from donkit_guard.decision import Decision, Explanation, Location, Outcome, PolicyMode
+from donkit_guard.declared import DeclaredDetectors
 from donkit_guard.engine import Engine
 from donkit_guard.findings import FindingClass
 from donkit_guard.guard import Guard, build_quickstart_guard
@@ -42,16 +49,21 @@ __all__ = [
     "Action",
     "ActionKind",
     "AgentRef",
+    "AllowAllEndpoints",
     "ApprovalDecisionValue",
     "ApprovalFlow",
     "ApprovalRecord",
+    "CredentialResolver",
     "Decision",
+    "DeclaredDetectors",
     "Destination",
     "DestinationLocality",
     "DestinationTrust",
     "EffectClass",
     "EffectSource",
+    "EndpointGuard",
     "Engine",
+    "EnvCredentialResolver",
     "Explanation",
     "FindingClass",
     "Guard",

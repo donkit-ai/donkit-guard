@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from donkit_guard.approval_flow import ApprovalFlow
+from donkit_guard.approval_flow import ApprovalFlow, with_outcome
 from donkit_guard.approvals import (
     ApprovalDecisionValue,
     ApprovalRecord,
@@ -11,7 +11,8 @@ from donkit_guard.approvals import (
     DeliveryMode,
 )
 from donkit_guard.context import GuardContext, Principal, PrincipalKind
-from donkit_guard.decision import Decision, Explanation, Outcome, PolicyMode
+from donkit_guard.decision import Decision, Explanation, Location, Outcome, PolicyMode
+from donkit_guard.findings import FindingClass
 from donkit_guard.memory import (
     InlineApprovalChannel,
     InMemoryApprovalStore,
@@ -216,6 +217,23 @@ async def test_a_denied_approval_clears_the_masks(
     denied = await flow.resolve(tool_context, decision, ttl_s=300, reevaluate=reevaluate)
     assert denied.outcome is Outcome.DENY and denied.explanation.code == "approval_unavailable"
     assert denied.masked_segments == {}
+
+
+def test_with_outcome_deny_drops_masked_locations(tool_context: GuardContext) -> None:
+    location = Location(
+        segment_id="seg",
+        path="/note",
+        start=0,
+        end=4,
+        cls=FindingClass.PII,
+        subtype="phone",
+    )
+    masked = _decision(tool_context).model_copy(
+        update={"masked_segments": {"seg": "<PHONE_ab12cd>"}, "masked_locations": (location,)}
+    )
+    denied = with_outcome(masked, Outcome.DENY, "policy_denied", "the payload cannot be masked")
+    assert denied.outcome is Outcome.DENY
+    assert denied.masked_segments == {} and denied.masked_locations == ()
 
 
 async def test_rejected_queued_approval_is_not_asked_again(

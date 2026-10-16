@@ -15,6 +15,14 @@ class AuditWriteError(GuardError):
     """The audit sink could not persist a critical event."""
 
 
+class EndpointRejected(GuardError):
+    """An endpoint guard refused a URL, so no request was sent to it."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class GuardDeniedError(GuardError):
     """Raised by hosts that turn a deny decision into control flow."""
 

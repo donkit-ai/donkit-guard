@@ -171,6 +171,17 @@ class Segment(FrozenModel):
         last = _unescape_pointer_token(self.path.rsplit("/", 1)[-1]).lower()
         return last in HASH_LIKE_FIELD_NAMES
 
+    def key(self) -> str:
+        """JSON object key the leaf sits under, unescaped and in its original case.
+
+        Trailing array indices are skipped, so an array element reports the key of its
+        array. Returns ``""`` for a segment without a path and for a top-level array element.
+        """
+        for token in reversed(self.path.split("/")[1:]):
+            if not (token.isascii() and token.isdigit()):
+                return _unescape_pointer_token(token)
+        return ""
+
     def label(self) -> str:
         return f"{self.source.value}{self.path}" if self.path else self.source.value
 
