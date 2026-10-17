@@ -24,7 +24,7 @@ Alpha, core under construction. The first tagged pre-release (`v0.1.0a1`) contai
 | Data classes | Per class: allow, block, mask, require approval, or route to an administrator-approved model. Masking keeps JSON and tool schemas valid and never changes the meaning of a business operation; when a safe transformation is impossible the call is blocked. |
 | Prompt injection | Detection of suspicious instructions in user messages, documents, retrieval context and tool results, kept separate from enforcement: untrusted content can never widen an agent's permissions or stand in for a user's confirmation. |
 | Declared detectors | A policy document can describe its own detectors: RE2 patterns with checksums, context words and JSON-key globs, word lists that survive case and Latin/Cyrillic look-alike letters, or a call to an organization's own analysis service over a public contract (OpenAPI file, conformance check and example service included). They are checked when the document loads and run isolated per tenant. See [docs/detectors.md](docs/detectors.md). |
-| Background checks | A detector whose findings only feed `audit` rules runs after the decision instead of before it, so a slow or failing one never delays or denies a request; its findings are recorded under the same decision id. Observe mode answers at once and evaluates in the background. |
+| Background checks | A detector whose findings only feed `audit` rules scans in the background, on workers of its own, while the decision goes back, so a slow or failing one never denies a request and delays only an approval card, which shows the arguments; its findings are recorded under the same decision id. Observe mode answers at once and evaluates in the background. |
 | Tool control | Mandatory check below the agent logic, before execution. Explicit deny wins; a protected action without a matching allow is denied. Sub-agents inherit no extra rights from delegation. A risk class declared by the tool provider itself never lowers the gate. |
 | Approvals | Dangerous operations pause *before* the side effect. An approval is bound to the action, the principal, the tenant (when there is one) and the policy version, expires, and cannot be replayed; changed arguments require a new decision. |
 | Policies | Versioned, validated before activation, explainable, revertible. Two working modes: **observe** (events are marked "would have been blocked") and **enforce**; **off** allows every action of a tenant without applying rules. Layers compose towards the stricter setting, so a tenant layer cannot switch platform enforcement off. |
@@ -37,7 +37,7 @@ Donkit Guard protects the traffic that passes through it. It is not a replacemen
 
 ## Optional extras
 
-The base install needs only `pydantic` and `pyyaml`. Two features use optional packages: declared pattern and word-list detectors need `pip install 'donkit-guard[re2]'`, and declared remote detectors and the HTTP client for the analyze contract need `pip install 'donkit-guard[http]'`. A feature whose extra is missing fails when it is used, with an error that names the extra.
+The base install needs only `pydantic` and `pyyaml`. Two features use optional packages: declared pattern detectors need `pip install 'donkit-guard[re2]'` (declared word lists need no extra), and declared remote detectors and the HTTP client for the analyze contract need `pip install 'donkit-guard[http]'`. A feature whose extra is missing fails when it is used, with an error that names the extra.
 
 ## Development
 

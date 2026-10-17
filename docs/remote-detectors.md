@@ -89,6 +89,11 @@ The request has exactly these fields.
 - **Status codes.** Answer with status 200 and the JSON body, also when the answer is
   `failed: true`. The guard accepts any 2xx; any other status is a failed call and its body is not
   read. Redirects are not followed, so a 3xx is a failed call as well.
+- **Answer uncompressed, within 1 MiB.** The guard sends `Accept-Encoding: identity` and refuses
+  an answer that comes with any other `Content-Encoding`, such as `gzip`, before reading it. A
+  service behind a server or proxy that compresses responses on its own leaves this endpoint out.
+  An answer larger than 1 MiB, the client's default cap, is a failed call as well. A service's own
+  `error` is cut to 200 characters.
 - **Keep the text out of your logs.** The request holds the text of the caller's payload, which may
   contain personal data and secrets. Do not log or store it unless the service's own policy says
   otherwise.
@@ -105,9 +110,10 @@ score outside 0 to 1, and it keeps at most 50 findings per segment.
   specified.
 - **Authentication** is an optional Bearer token: `Authorization: Bearer <token>`. The guard sends
   it when the declaration names a `credential` and the host's `CredentialResolver` returns a token
-  for it, and sends no `Authorization` header otherwise. Whether a token is required is the
-  service's choice; one that requires it answers `401` to a request without a valid token, which the
-  guard reports as a failed call. Serve the endpoint over `https` whenever a token travels.
+  for it and the declared endpoint, and sends no `Authorization` header otherwise. Whether a token
+  is required is the service's choice; one that requires it answers `401` to a request without a
+  valid token, which the guard reports as a failed call. Serve the endpoint over `https` whenever a
+  token travels.
 - **Versioning.** The path carries the major version of the contract. Within `/v1/` the contract
   changes only in ways that keep every conforming service and caller working, such as a new
   optional field in a response, which callers ignore. A change that could break one of them is
@@ -117,12 +123,14 @@ A service may be mounted under any prefix: the declaration holds the full URL of
 
 ## What the guard sends
 
-A remote detector sends the service the text of the segments it scans, and `lang` as the host
-recorded it for each segment (or `null`). Nothing else leaves: no tenant, principal, tool or policy
-information. The segments are those the guard has no cached answer for, so a segment it has already
-scanned is not sent again within the detector's `cache_ttl_s`. Segments that are not inspected,
-segments over the policy's `segment_limit_bytes`, and values of JSON fields named like digests or
-identifiers (`sha256`, `etag`, `uuid`, `hash` and the like) are not sent.
+A remote detector runs only when a rule that matched the context could use its findings. It sends
+the service the text of the segments it scans, `lang` as the host recorded it for each segment (or
+`null`), and the bearer token the host's resolver returned, if any. Nothing else leaves: no tenant,
+principal, tool or policy information. The segments are those the guard has no cached answer for,
+so a segment it has already scanned is not sent again within the detector's `cache_ttl_s`.
+Segments that are not inspected, segments over the policy's `segment_limit_bytes`, and values of
+JSON fields named like digests or identifiers (`sha256`, `etag`, `uuid`, `hash` and the like) are
+not sent.
 
 A text longer than 32 KiB is cut at line boundaries into chunks. A chunk gets an id of the guard's
 own making, the service answers with offsets into the chunk, and the guard re-bases them onto the
@@ -188,50 +196,103 @@ detector = PiiNerDetector(client)  # hand it to the DetectorRunner
 await client.aclose()  # at shutdown
 ```
 
-`DeclaredDetectors` creates one client for each declared `remote` detector and wires the hooks
-below into it. The client needs the `http` extra; constructing it without `httpx` raises a
-`RuntimeError` that names the extra. Because the address can come from a policy document, the
-client is deliberately narrow:
+The client needs the `http` extra; constructing it, or the `HttpConnections` below, without `httpx`
+raises a `RuntimeError` that names the extra. Because the address can come from a policy document,
+the client is deliberately narrow:
 
 - It takes **no proxy or certificate settings from the environment** (`HTTP_PROXY`,
   `SSL_CERT_FILE` and the like are ignored).
 - It **never follows a redirect**. An address is approved as written, and a redirect must not carry
   the request somewhere else.
-- `verify` is `True` for the default CA bundle, a path to a CA file or directory for a private CA
-  (`DeclaredDetectors(ca_bundle=...)` sets it for the declared detectors), or `False` to switch
-  certificate checks off, which only suits tests.
-- It **caps the size of the answer** at `max_response_bytes` (1 MiB by default), counted after
-  decompression. A larger answer is a failure.
+- It **asks for an uncompressed answer** (`Accept-Encoding: identity`) and refuses a compressed one
+  before reading it, because a small compressed body can unpack into far more than the cap below.
+- It **caps the size of the answer** at `max_response_bytes` (1 MiB by default), counted in bytes
+  as they are received. A larger answer is a failure.
 - It **never raises** for a failed exchange. Every failure comes back as
   `AnalyzeResponse(failed=True, error=...)`, which the detector turns into a failed check. The
   error is a short phrase; it never contains the token or any part of the answer, and neither does
-  a log line. A service's own `error` is passed on as it is.
+  a log line. A service's own `error` is passed on, cut to 200 characters.
 
 | Error | Cause |
 | --- | --- |
 | `endpoint rejected: <reason>` | The `EndpointGuard` refused the address. Nothing was sent. |
-| `credential not found` | The declaration names a credential and the resolver returned none. Nothing was sent. |
+| `credential not found` | The declaration names a credential, and there is no resolver or it returned no token. Nothing was sent. |
 | `invalid credential` | The token holds characters that cannot go into a header. Nothing was sent. |
 | `HTTP <status>` | The service answered with a status other than 2xx, a redirect included. |
-| `response too large` | The answer outgrew `max_response_bytes`. |
+| `unsupported content encoding` | The answer came compressed, with a `Content-Encoding` other than `identity`. Its body was not read. |
+| `response too large` | The answer outgrew `max_response_bytes`, counted as it was received. |
 | `invalid response: <where>: <reason>` | The answer is not JSON, or does not fit the contract. |
 | `transport: <ExceptionClass>` | The connection, the TLS handshake or a wait failed. |
 | `invalid endpoint` | The address is not a usable URL. |
-| `client closed` | `aclose()` was called. |
+| `client closed` | `aclose()` was called on the client or on the connections it shares. Nothing was sent. |
 
 The timeout is the deadline the runner gives the detector (the declaration's `timeout_ms`), applied
 to connecting, sending and every wait on the service, and the runner bounds the call as a whole.
+
+### Connections and certificates
+
+A client sends its requests through `HttpConnections`, which keeps one connection pool per origin
+(scheme, host and port), made the first time a client calls that origin, all with the same
+certificate setting. Clients given the same `connections=` share those pools, so many clients of a
+few services keep a few pools. Such a client owns nothing: its `aclose()` stops only that client,
+and `HttpConnections.aclose()` closes the pools for all of them. A client given no connections
+makes its own from `verify` and `transport` and closes them in its own `aclose()`.
+
+```python
+from donkit_guard.http import HttpAnalyzeClient, HttpConnections, tls_verify
+
+connections = HttpConnections(verify=tls_verify("/etc/ssl/organization-ca.pem"))
+ner = HttpAnalyzeClient("https://guard-pii.internal/v1/analyze", connections=connections)
+contracts = HttpAnalyzeClient("https://contracts.internal/v1/analyze", connections=connections)
+
+await connections.aclose()  # at shutdown, for both clients
+```
+
+- `verify` is `True` for the default CA bundle, an SSL context that trusts a private CA, or `False`
+  to switch certificate checks off, which only suits tests. `tls_verify(ca_bundle)` makes it from a
+  CA file or directory, and gives `True` for `None`. It reads a file at once, so a missing or
+  unreadable file raises `OSError` and one without a certificate in it `ssl.SSLError`; the
+  certificates of a directory are read when a connection needs them.
+- `HttpAnalyzeClient(..., verify=...)` also takes the path itself, for a client that makes its own
+  connections. A client given `connections=` uses their setting, and passing `verify` or
+  `transport` as well raises `ValueError`.
+- `transport` replaces the network layer; tests use it to stand in for a service.
+- The pools keep connections open for reuse. The idle connections of an origin are closed once
+  they outlive their keep-alive expiry, the next time a client calls that origin; an origin that is
+  not called again keeps them until `aclose()`.
+- Connections are bound to the event loop that made them, so a host that calls services from
+  several event loops gives each loop connections of its own.
+
+`DeclaredDetectors` gives every declared `remote` detector a client of its own, wires the hooks
+below into it, and lets all of them share one `HttpConnections`, made with the first remote
+detector, so that documents without remote declarations need no `http` extra.
+`DeclaredDetectors.aclose()`, which `Engine.aclose()` calls, closes it; a remote detector handed out
+before then fails with `client closed`. `DeclaredDetectors(ca_bundle=...)` passes the bundle to
+`tls_verify` when it is constructed, so a bad file fails there and not in an evaluation, and its
+`http_transport` stands in for the services in tests.
 
 ## Credentials and addresses
 
 A policy document names the credential a remote detector needs and the address to call, and both
 can come from a tenant. The host decides what they stand for, through two hooks of
-`donkit_guard.adapters`:
+`donkit_guard.adapters` that it passes to `DeclaredDetectors`:
 
-| Hook | Responsibility | Default |
+| Hook | Responsibility | When the host passes none |
 | --- | --- | --- |
-| `CredentialResolver.token(tenant_id, name)` | Turns the credential `name` of a declaration into a token, per tenant when the host keeps secrets that way. `None` means there is no such credential, and the detector fails with `credential not found` without sending anything. | `EnvCredentialResolver`: reads `DONKIT_GUARD_CREDENTIAL_<NAME>`, the name upper-cased with `-` turned into `_` (`bank-dlp` is `DONKIT_GUARD_CREDENTIAL_BANK_DLP`), the same for every tenant. |
+| `CredentialResolver.token(tenant_id, name, endpoint)` | Turns the credential `name` of a declaration into a token for `endpoint`, the declared URL the token would be sent to, per tenant when the host keeps secrets that way. `None` means there is no such credential, or none for that endpoint, and the detector fails with `credential not found` without sending anything. | No credential resolves: a declaration that names a `credential` fails with `credential not found` and sends nothing. |
 | `EndpointGuard.check(url)` | Decides whether a remote detector may call the URL. Raise `donkit_guard.errors.EndpointRejected(reason)` to refuse, return to allow. A refusal fails the detector with `endpoint rejected: <reason>` and sends nothing. | `AllowAllEndpoints`: accepts every URL. |
+
+Credentials are opt-in because a document chooses both the name of a credential and the address
+its token goes to. `EnvCredentialResolver` reads `DONKIT_GUARD_CREDENTIAL_<NAME>`, the name
+upper-cased with `-` turned into `_` (`bank-dlp` is `DONKIT_GUARD_CREDENTIAL_BANK_DLP`), the same
+for every tenant and every endpoint. Pass it, as
+`DeclaredDetectors(credential_resolver=EnvCredentialResolver())`, only when the host writes every
+policy document itself: any document may name any of these variables and have its value sent to the
+endpoint the document declares. A credential name is not private to the document that declares it
+either: every document of a bundle may name any credential, those of the host's own layers
+included. A host that takes documents from its tenants therefore binds each credential to the
+tenant and the endpoint it was issued for, as `TenantSecrets` below does, so that a document that
+names it next to another address gets no token.
 
 The resolver is asked before every request, so a secret the host rotates takes effect at once; a
 resolver whose lookup is expensive caches inside itself. The guard is asked before the resolver, so
@@ -239,10 +300,10 @@ a refused address never costs a secret lookup.
 
 The default `AllowAllEndpoints` suits documents from a source the host trusts. A host that accepts
 documents from its tenants must provide an `EndpointGuard`: otherwise a tenant can point a remote
-detector at an address inside the host's network, and the guard sends the text it scans there. An
-allow-list of hosts is the safest form. The guard checks the URL as written, before every request;
-it does not pin the address the name resolves to, so allow names that you control rather than
-trying to filter by resolved address.
+detector at an address inside the host's network or at a cloud metadata service, and the guard
+sends the text it scans there. An allow-list of hosts is the safest form. The guard checks the URL
+as written, before every request; it does not pin the address the name resolves to, so allow names
+that you control rather than trying to filter by resolved address.
 
 ```python
 from collections.abc import Mapping
@@ -253,13 +314,15 @@ from donkit_guard.errors import EndpointRejected
 
 
 class TenantSecrets:
-    """CredentialResolver: one secret per tenant and credential name."""
+    """CredentialResolver: a secret per tenant and credential name, for one endpoint only."""
 
-    def __init__(self, secrets: Mapping[tuple[str, str], str]) -> None:
+    def __init__(self, secrets: Mapping[tuple[str, str, str], str]) -> None:
         self._secrets = secrets
 
-    async def token(self, tenant_id: str | None, name: str) -> str | None:
-        return self._secrets.get((tenant_id or "", name))
+    async def token(self, tenant_id: str | None, name: str, endpoint: str) -> str | None:
+        # Keyed by the endpoint too: a document that names the credential next to another
+        # address gets no token, and its detector fails without sending anything.
+        return self._secrets.get((tenant_id or "", name, endpoint))
 
 
 class AllowedHosts:
@@ -274,8 +337,10 @@ class AllowedHosts:
             raise EndpointRejected(f"host {host!r} is not approved")
 
 
+ENDPOINT = "https://detector.example.com/v1/analyze"
+
 declared = DeclaredDetectors(
-    credential_resolver=TenantSecrets({("acme", "customer-records"): "change-me"}),
+    credential_resolver=TenantSecrets({("acme", "customer-records", ENDPOINT): "change-me"}),
     endpoint_guard=AllowedHosts(frozenset({"detector.example.com"})),
 )
 ```

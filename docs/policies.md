@@ -159,5 +159,7 @@ audited rather than replaced by a placeholder) and all personal data is audited;
 audited; `read` and `execute` tool calls are allowed (the sandbox bounds execution); `write`,
 `spend` and `egress` tool calls require approval, which also covers an undeclared effect;
 model requests and tool results are allowed. The detectors that only its `audit` rules can use
-(personal data bound for a platform destination, injection) run in the background, after the
-decision; see [detectors.md](detectors.md#which-detectors-run).
+(personal data anywhere but in a model request to a non-platform destination, injection) run in
+the background, after the decision, so the decision a host receives lists neither the `audit`
+rules they feed (`pii-audit`, `injection-audit`) nor their findings: those come in the decision's
+`FindingsEvent`. See [detectors.md](detectors.md#which-detectors-run).

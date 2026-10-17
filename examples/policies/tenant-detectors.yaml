@@ -37,7 +37,8 @@ detectors:
         - "An albatrosses flew past the ship"
         - "Superalbatross is a different product"
   # A placeholder address: point it at your own service, and see docs/remote-detectors.md for
-  # the contract. The token comes from the host under the name given as `credential`.
+  # the contract. The host's CredentialResolver turns the name given as `credential` into a
+  # token for this endpoint; a host without one sends nothing, and the detector fails.
   - kind: remote
     id: customer-records
     title: Customer records service
@@ -77,7 +78,8 @@ layers:
         action: deny
         reason: "A project code name must not leave the organization"
       # Only an audit rule can use the findings of the remote detector, so the engine runs it
-      # in the background: a slow or failing service never delays or denies a request.
+      # in the background: a slow or failing service never denies a request, and only an
+      # approval card waits for it.
       - id: customer-records-audited
         description: The customer records service informs the audit trail only
         match:

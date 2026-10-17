@@ -113,7 +113,7 @@ def build_quickstart_guard(
 
     ``declared`` builds the detectors that policy documents declare. Pass one to give them the
     host's own credential resolver, endpoint guard or CA bundle; by default the engine makes
-    its own.
+    its own, which resolves no credentials and accepts every endpoint.
     """
     detectors: list[SecretsDetector | PiiChecksumDetector | InjectionHeuristic | PiiNerDetector] = [
         SecretsDetector(),

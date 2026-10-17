@@ -173,7 +173,7 @@ class Engine:
     Background checks run as tasks of the event loop the engine is used on: ``drain`` waits
     for them, and ``aclose`` finishes or cancels them before releasing the detectors.
     ``declared`` builds the detectors that policy documents declare; by default the engine
-    makes its own.
+    makes its own, which resolves no credentials and accepts every endpoint.
     """
 
     def __init__(

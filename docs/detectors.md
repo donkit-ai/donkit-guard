@@ -175,6 +175,13 @@ A term matches like this:
 
 One segment yields at most 50 findings.
 
+Terms need no extra: they are matched in plain Python, not with RE2. A scan takes time linear in
+the length of the text, times the number of distinct lengths among the terms that share their
+first 8 characters, so the full limit of 5000 terms of 200 characters each works whatever the text
+holds. Building the detector indexes the terms, which takes a fraction of a second for a full list
+and happens when the document is loaded and when the detector is built for a tenant, not on every
+request (see [Caching and tenants](#caching-and-tenants)).
+
 ### `remote`
 
 Delegates detection to a service that speaks the [analyze contract](remote-detectors.md).
@@ -182,26 +189,28 @@ Delegates detection to a service that speaks the [analyze contract](remote-detec
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `endpoint` | required | The `http` or `https` URL of the analyze endpoint: up to 2048 characters, with a host, and without user, password, query or fragment. A token belongs in a credential, not in the URL. |
-| `credential` | none | The name of the token the service expects (`^[a-z0-9][a-z0-9-]{0,63}$`). A document never carries a secret: the host's `CredentialResolver` turns the name into a token, which goes out as a bearer token. Without a `credential` no token is sent. |
+| `credential` | none | The name of the token the service expects (`^[a-z0-9][a-z0-9-]{0,63}$`). A document never carries a secret: the host's `CredentialResolver` turns the name into a token for the declared `endpoint`, which goes out as a bearer token. A host that passes no resolver resolves no credential, and the detector then fails with `credential not found` without sending anything. Without a `credential` no token is sent. |
 | `entities` | required | 1 to 50 entries, each mapping an entity type the service reports (1 to 64 characters) to the `class` and `subtype` of the finding. Types the declaration does not list are ignored. |
 | `timeout_ms` | `2000` | 100 to 30000. How long the guard waits for the service in one scan. The service is asked to answer within 80% of it. |
 | `required` | `true` | Whether a failed call fails the decision; see below. |
 | `cache_ttl_s` | `3600` | 0 to 86400. How long the answer for a text is reused. `0` never reuses an answer, and a failed answer is never reused. |
 
-A call fails when the service does not answer within `timeout_ms`, answers with an error status or
-with something unusable, or reports `failed: true`, and also when the host refuses the address or
-has no token for the credential. What a failure does depends on `required` and on who can use the
-detector:
+A call fails when the service does not answer within `timeout_ms`, answers with an error status,
+compressed, with more than 1 MiB or with something unusable, or reports `failed: true`, and also
+when the host refuses the address or has no token for the credential. What a failure does depends
+on `required` and on who can use the detector:
 
 - `required: true` (the default) and a rule with an action other than `audit` could use the
   detector: in enforce mode the decision is a deny with code `detector_unavailable`, and in observe
   mode the recorded decision carries the code `detector_failed`.
 - `required: false`, or only `audit` rules could use the detector: the decision goes on without
-  it, and the detector is listed in `Decision.unchecked_detectors`.
+  it, and the detector is listed as unchecked, in `Decision.unchecked_detectors` when the decision
+  waited for it and in the decision's `FindingsEvent` when it ran in the background.
 
 A remote declaration takes no examples and is not contacted when the document is loaded. The text
 of the segments the detector scans leaves the process for the service; what exactly is sent is
-described in [remote-detectors.md](remote-detectors.md#what-the-guard-sends).
+described in [remote-detectors.md](remote-detectors.md#what-the-guard-sends), and what a host has
+to decide about it in [threat-model.md](threat-model.md#declared-detectors-from-policy-documents).
 
 ### Examples
 
@@ -225,10 +234,10 @@ is wrong. `<index>` is the position of the declaration in the `detectors` list, 
 | --- | --- |
 | `detectors/<index>/patterns/<n>: <reason>` | RE2 refused the pattern, for example a lookbehind. |
 | `detectors/<index>/patterns: <reason>` | Every pattern compiles on its own, but RE2 refuses them combined. |
-| `detectors/<index>/terms: <reason>` | The list of terms cannot be compiled, for example a term made only of invisible characters. |
+| `detectors/<index>/terms: <reason>` | A term has no visible characters, for example one made only of zero-width characters. |
 | `detectors/<index>/examples/match/<n>: found nothing` | A `match` example produced no finding. |
 | `detectors/<index>/examples/no_match/<n>: found <subtype>` | A `no_match` example produced a finding. |
-| `detectors/<index>: pattern and terms detectors need the 're2' extra: ...` | The `re2` extra is not installed. |
+| `detectors/<index>: pattern detectors need the 're2' extra: ...` | The declaration is a `pattern` detector with `patterns`, and the `re2` extra is not installed. |
 
 ### Limits
 
@@ -255,16 +264,16 @@ The base install needs only `pydantic` and `pyyaml`. Declared detectors use two 
 
 | Extra | Package | Needed for |
 | --- | --- | --- |
-| `re2` | `google-re2` | `pattern` detectors that have `patterns`, and `terms` detectors |
-| `http` | `httpx` | `remote` detectors, `donkit_guard.http.HttpAnalyzeClient` and the conformance command |
+| `re2` | `google-re2` | `pattern` detectors that have `patterns` |
+| `http` | `httpx` | `remote` detectors, `donkit_guard.http` (`HttpAnalyzeClient`, `HttpConnections`) and the conformance command |
 
     pip install 'donkit-guard[re2,http]'
 
 Importing `donkit_guard` needs neither. A feature whose extra is missing fails when it is used,
-with an error that names the extra: loading a document with a `pattern` (with `patterns`) or
-`terms` detector raises `PolicyError`, and evaluating a bundle that declares a `remote` detector is
-denied with code `policy_error`. A `pattern` detector that declares only `json_keys` compiles
-nothing and runs without `re2`.
+with an error that names the extra: loading a document with a `pattern` detector that has
+`patterns` raises `PolicyError`, and evaluating a bundle that declares a `remote` detector is
+denied with code `policy_error`. `terms` detectors need no extra, and neither does a `pattern`
+detector that declares only `json_keys`, because it compiles nothing.
 
 ## Which detectors run
 
@@ -276,7 +285,7 @@ rules that matched the context and select findings (the ones with `finding_class
 | Selection | When | What follows |
 | --- | --- | --- |
 | synchronous | a rule with the action `allow`, `deny`, `mask` or `require_approval` could use its findings | the decision waits for it, and the failure of a required detector fails the decision |
-| background | only `audit` rules could use its findings | the decision does not wait; the findings are written afterwards, and a failure never changes the decision |
+| background | only `audit` rules could use its findings | the decision does not wait, unless it asks for approval of a tool call; the findings are written afterwards, and a failure never changes the outcome |
 | unused | no rule could use its findings | it is not run |
 
 A rule *could use* a detector when the detector can report what the rule selects: one of the
@@ -292,7 +301,19 @@ Under the shipped default policy a model request to a platform destination runs 
 synchronously (`secrets-mask`), while `pii-checksum`, `pii-ner` and `injection-heuristic` only feed
 `audit` rules (`pii-audit`, `injection-audit`) and run in the background. The same request to a
 `tenant` or `unknown` destination runs the PII detectors synchronously, because
-`pii-mask-untrusted-destination` then matches the context.
+`pii-mask-untrusted-destination` then matches the context. A tool call runs `secrets`
+synchronously and the PII and injection detectors in the background, whatever its effect: personal
+data in tool arguments only feeds `pii-audit`.
+
+Because the decision does not wait for them, what background detectors find is not part of it:
+their rules are missing from `explanation.rule_ids`, their findings from
+`explanation.finding_classes` and `explanation.locations`, and they do not make the decision
+`critical` (in enforce mode a critical decision whose event cannot be written is denied). Under the
+default policy that leaves out `injection-audit` and the `injection` class on every call, and
+`pii-audit` and the `pii` class on every call but a model request to a `tenant` or `unknown`
+destination. They come in the decision's `FindingsEvent` instead (see
+[Background checks](#background-checks)); a host that needs them in the decision itself evaluates
+with `defer=False`.
 
 `Decision.detector_versions` lists the detectors selected for the call, synchronous and
 background, as `name@version` with the hash of the pattern set each used. For a declared detector
@@ -302,25 +323,34 @@ was in force.
 ## Background checks
 
 A detector that only `audit` rules can use scans while the decision goes back to the caller, so a
-slow or failing one costs the call nothing. What it finds is written afterwards:
+slow or failing one never denies the call and holds up only an approval card. Its scan starts just
+before the synchronous scan of the same evaluation and runs in the runner's
+[background lane](#the-background-lane). What it finds is written afterwards:
 
 - A `FindingsEvent` (`event_type: "findings"`) is recorded through the `AuditSink` after the
   decision's `DecisionEvent`, under the same `decision_id`. It carries the summary of the context,
   the `locations` of the findings (at most `EngineSettings.max_locations`), their
-  `finding_classes`, the ids of the `audit` rules they matched (`rule_ids`) and
-  `unchecked_detectors`: the background detectors that failed, because what they did not flag is
-  unknown, not clean.
-- Nothing is written when the background detectors found nothing and none failed, nor when the
-  decision itself was not recorded (`audit=False`).
-- A failure of a background detector never denies the decision and never delays it.
+  `finding_classes`, the ids of the `audit` rules they matched (`rule_ids`),
+  `unchecked_detectors` (the background detectors that failed, because what they did not flag is
+  unknown, not clean) and `display_args_redacted`: the argument previews of a tool call that the
+  decision held back while the check ran, or `None` (see [Argument previews](#argument-previews)).
+- It is written when the background detectors found something, when one of them failed, or when
+  it carries argument previews, which it does also when the detectors found nothing.
+- Nothing is written when the decision event was not. With `audit=False` every detector runs
+  before the decision is returned, and when the sink fails to write the `DecisionEvent` the
+  findings are dropped with it, so findings never reach the audit trail without their decision.
+- A failure of a background detector never denies the decision. Only a decision that asks for
+  approval of a tool call waits for the background detectors, because its approval card shows the
+  arguments; see [Argument previews](#argument-previews).
 - `Decision.unchecked_detectors` lists, as `name@version`, the detectors whose findings the
   decision did not get: an optional or audit-only detector that failed while the decision waited
   for it, and background detectors that did not start for lack of room. Whoever reads the audit
   trail must not take the missing findings for a clean payload. Such a decision is `critical`, so
   in enforce mode its audit event is written fail-closed.
 
-At most `EngineSettings.max_background_checks` (200) background checks run at once. With no room
-left the audit-only detectors are not started and are listed in `unchecked_detectors`.
+At most `EngineSettings.max_background_checks` (200) background checks run at once, the evaluations
+that observe mode defers included. With no room left the audit-only detectors are not started and
+are listed in `unchecked_detectors`.
 
 The checks belong to the process. `Engine.drain()` waits until every one of them has finished, for
 tests and for an orderly shutdown. `Engine.aclose()`, which `Guard.aclose()` calls, waits up to
@@ -330,30 +360,119 @@ shutdown that cancels the check leaves no `FindingsEvent`. If losing a finding i
 the rule behind it should not be an `audit` rule, because a detector that a `mask`, `deny` or
 `require_approval` rule can use finishes before the decision goes back.
 
+The checks are also tasks of the event loop the engine is used on, and a loop that closes cancels
+them. A host that runs a new event loop per call, for example `asyncio.run` for every request,
+loses its background checks and its deferred observe-mode decisions when that loop closes. Such a
+host evaluates with `defer=False`, which runs every selected detector before the decision is
+returned, or awaits `Engine.drain()` before the loop ends.
+
+### The background lane
+
+`DetectorRunner.run(..., background=True)` runs a scan in the runner's background lane. The engine
+uses it for background checks and for the evaluations that observe mode defers; synchronous scans,
+the re-evaluation after an approval among them, take the foreground lane. The background lane
+keeps its work away from the foreground:
+
+- Its local detectors run on workers of their own, `background_workers` of them (default 1), one
+  scan per worker, next to the `max_workers` that serve the foreground. With
+  `ExecutorKind.PROCESS` the runner therefore keeps one more worker process.
+- It keeps at most `max_background_remote` (default 16) remote calls in flight, so that the
+  detectors' services keep room for the foreground calls.
+- A background scan waits for its turn before its deadline starts, so a backlog never times it
+  out, and a local one gets at least `Budget.background_min_ms` (1000 ms), since no answer waits
+  for it.
+
+Background work therefore never delays a foreground scan and never makes one time out. Turns are
+counted per event loop.
+
+```python
+from donkit_guard.detectors import (
+    Budget,
+    DetectorRunner,
+    ExecutorKind,
+    InjectionHeuristic,
+    PiiChecksumDetector,
+    SecretsDetector,
+)
+
+runner = DetectorRunner(
+    [SecretsDetector(), PiiChecksumDetector(), InjectionHeuristic()],
+    executor=ExecutorKind.PROCESS,
+    max_workers=2,
+    background_workers=1,
+    max_background_remote=16,
+    budget=Budget(background_min_ms=1000.0),
+)
+```
+
+The lane gives no priority within its own work. The background detectors of an approval card take
+their turn behind the other background checks and the deferred observe-mode evaluations, so a
+backlog of background work slows approval cards down; their deadlines start only once they run, so
+the wait does not fail them. Without a backlog an approval card waits for the longer of the
+synchronous and the background scan, not for both in turn, because the background check starts
+first.
+
+With `ExecutorKind.SYNC`, which `build_quickstart_guard` uses and which suits tests, there are no
+workers: every local detector runs on the event loop itself, background ones included, so a
+background scan holds up whatever the loop runs next, the caller's answer included.
+
 ## Observe mode
 
 Observe mode never blocks, so the caller need not wait for the evaluation. `Engine.evaluate`
 returns at once an `allow` with `explanation.code` set to `observe_deferred`, `mode` `observe` and
-a fresh `decision_id`, and evaluates in the background. The full decision, with `would_outcome`,
-`would_block`, the locations and `detector_versions`, is recorded later as a `DecisionEvent` under
-that `decision_id`. The immediate answer is not recorded and carries no findings, so a host reads
-the outcome of an observe-mode evaluation from the audit trail. Like background findings, a
-deferred decision is lost if the process ends before it is recorded.
+a fresh `decision_id`, and evaluates in the background, in the runner's background lane. The full
+decision, with `would_outcome`, `would_block`, the locations and `detector_versions`, is recorded
+later as a `DecisionEvent` under that `decision_id`. The immediate answer is not recorded and
+carries no findings, so a host reads the outcome of an observe-mode evaluation from the audit
+trail. Like background findings, a deferred decision is lost if the process ends, or its event
+loop closes, before it is recorded.
+
+A host acts on the answer at once and may record the execution before the deferred decision is
+written. The engine then holds the `ExecutionEvent` back and writes it once the evaluation has
+written its `DecisionEvent`, so a sink sees a decision before its execution. That chained write is
+background work: `Engine.drain()` and `Engine.aclose()` cover it, it takes room among the
+`max_background_checks` but is never refused, and a sink error in it is logged instead of raised,
+because `record_execution` has already returned. An execution event recorded once its decision is
+written, or for a decision that was not deferred, is written at once, and a sink error reaches the
+caller.
 
 An evaluation is not deferred, and the call returns the real decision, when no room is left for
 background work, with `audit=False`, and with `evaluate(..., defer=False)`. `Guard.authorize` uses
 `defer=False` for the re-evaluation that follows an approval. With `defer=False` every selected
 detector, background ones included, runs before the decision is returned.
 
-## Approval cards
+## Argument previews
 
-An approval card shows one bounded preview per tool argument, with the spans the detectors found
-blacked out. A decision that asks for approval therefore waits for its background detectors, so
-that what they find is blacked out too. If one of them failed, or none could start for lack of
-room, the guard cannot tell which values hold findings: the card then shows none of them, each
-value being a run of `█` as long as the value (up to `EngineSettings.preview_chars`), and the
-detectors are listed in `unchecked_detectors`. The same happens when an optional detector failed
-during a synchronous scan. The preview in the audit event is the same one.
+The decision on a tool call carries one bounded preview per argument value,
+`Decision.display_args_redacted`, with the spans the detectors found blacked out; the approval
+card and the `DecisionEvent` carry the same previews. A value is shown only once every selected
+detector has reported on it. Until then the guard cannot tell which values hold findings, so it
+shows none of them: each value is a run of `█` as long as the value (up to
+`EngineSettings.preview_chars`). That happens in three cases:
+
+- **A background check is still running.** This is the usual case for a tool call that asks for
+  no approval, because under the default policy the PII and injection detectors scan tool
+  arguments in the background. Once they have reported, the decision's `FindingsEvent` carries
+  the readable previews in `display_args_redacted`, with what every detector found blacked out,
+  and it is written for them even when the background detectors found nothing. A host's audit
+  view shows those previews in place of the decision's. If a background detector fails, no
+  previews follow: the values stay hidden, and the `FindingsEvent` lists the detector in
+  `unchecked_detectors`.
+- **A detector failed while the decision waited for it.** An optional or audit-only one is listed
+  in `unchecked_detectors`; a required one that a deciding rule uses fails the decision. No
+  readable previews follow, also when a background check was running as well.
+- **A background detector was not started** for lack of room. It is listed in
+  `unchecked_detectors`, and no readable previews follow.
+
+A decision that asks for approval of a tool call waits for its background detectors instead,
+because the approver reads the card before anything happens: the card shows the values with what
+every detector found blacked out, unless a detector failed or did not start, and then it shows
+none of them. A decision that waits for every detector anyway, with `defer=False` or
+`audit=False`, or the decision that observe mode records later, shows the values the same way.
+
+Previews black out what the evaluation found in the payload. An argument value that the payload
+does not carry, or whose segment is listed in `seen_segments`, is not scanned by this evaluation
+and is shown as it is.
 
 ## Caching and tenants
 
@@ -365,16 +484,19 @@ declaration never reads the results of its earlier version. The results of a `pa
 detector stay for the cache's default lifetime, those of a `remote` detector for its
 `cache_ttl_s`.
 
-`DeclaredDetectors` keeps the detectors it built, so a declaration is compiled once per tenant
-and not once per request, and the same declaration in a document that is loaded anew finds its
-detector again. Up to `max_cached` (256) detectors are kept, the least recently used one going
-first.
+`DeclaredDetectors` keeps the detectors it built, so a declaration is built (its patterns
+compiled, its terms indexed) once per tenant and not once per request, and the same declaration in
+a document that is loaded anew finds its detector again. Up to `max_cached` (256) detectors are
+kept, the least recently used one going first. The remote detectors share the HTTP connections of
+their `DeclaredDetectors`, one pool per origin, which stay open until `aclose`, so a remote
+detector dropped from the cache keeps working for an evaluation that still holds it.
 
 ## Wiring in a host
 
 The engine builds declared detectors through a `DeclaredDetectors`. Without one it makes its own,
-which reads credentials from environment variables and allows every URL. A host that takes
-documents from its tenants passes its own hooks (see
+which resolves no credentials and allows every URL: a remote declaration that names a
+`credential` fails with `credential not found` and sends nothing. A host that gives remote
+detectors their credentials, or takes documents from its tenants, passes its own hooks (see
 [remote-detectors.md](remote-detectors.md#credentials-and-addresses)):
 
 ```python
@@ -393,8 +515,20 @@ engine = Engine(
 )
 ```
 
-`build_quickstart_guard(declared=...)` takes the same object. `Engine.aclose()` closes the HTTP
-clients that `DeclaredDetectors` opened.
+`build_quickstart_guard(declared=...)` takes the same object. A `ca_bundle` file is read when
+`DeclaredDetectors` is constructed, so a missing or unreadable one raises `OSError` there, not in
+an evaluation. `Engine.aclose()` calls `DeclaredDetectors.aclose()`, which closes the HTTP
+connections its remote detectors share; a remote detector handed out before fails with
+`client closed` from then on.
+
+An engine and its `DeclaredDetectors` belong to the event loop they are used on. The background
+checks are tasks of that loop, and the HTTP connections are bound to the loop that made them: a
+remote detector called from another loop fails its check when it reuses a connection of the
+first. A host that evaluates on several event loops therefore gives each loop an `Engine` with a
+`DeclaredDetectors` of its own. A `DetectorRunner` may serve several loops, but its background lane
+counts turns per loop, so the background scans of several loops can queue for the same workers and
+run out of time there. A host that runs a new loop per call also evaluates with `defer=False`; see
+[Background checks](#background-checks).
 
 ## Optional detector attributes
 

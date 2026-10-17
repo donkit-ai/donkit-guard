@@ -91,13 +91,28 @@ layers:
         reason: "Contract numbers do not go to a model"
 ```
 
-`credential` names the token the service expects; the document never carries its value. By default
-it is read from the environment variable `DONKIT_GUARD_CREDENTIAL_CONTRACT_SERVICE` (the name
-upper-cased, `-` turned into `_`), and a host that keeps secrets per tenant supplies its own
-`CredentialResolver`. Leave `credential` out for a service without a token. A host that accepts
-policy documents from its tenants can refuse internal addresses such as `127.0.0.1` with an
-`EndpointGuard`, so the address in `endpoint` has to be one the host allows. Calling a remote
-detector needs the `http` extra: `pip install 'donkit-guard[http]'`.
+`credential` names the token the service expects; the document never carries its value. The host's
+`CredentialResolver` turns the name into a token for the declared endpoint. Credentials are opt-in:
+without a resolver none resolves, the detector fails with `credential not found` and sends nothing,
+and because the `mask` rule above needs the detector, an enforce-mode decision on a model request
+is then a deny with code `detector_unavailable`. A host that writes its policy documents itself can
+take the token from the environment variable `DONKIT_GUARD_CREDENTIAL_CONTRACT_SERVICE` (the name
+upper-cased, `-` turned into `_`):
+
+```python
+from donkit_guard import DeclaredDetectors, EnvCredentialResolver
+
+declared = DeclaredDetectors(credential_resolver=EnvCredentialResolver())
+# Engine(..., declared=declared) or build_quickstart_guard(declared=declared)
+```
+
+A host that accepts policy documents from its tenants uses a resolver of its own instead, one that
+binds each credential to its tenant and its endpoint, because any document may name any credential.
+Such a host can also refuse internal addresses such as `127.0.0.1` with an `EndpointGuard`, so the
+address in `endpoint` has to be one the host allows; see
+[`docs/remote-detectors.md`](../../docs/remote-detectors.md#credentials-and-addresses). Leave
+`credential` out for a service without a token. Calling a remote detector needs the `http` extra:
+`pip install 'donkit-guard[http]'`.
 
 [`docs/detectors.md`](../../docs/detectors.md) lists every field of a declared detector, including
 the timeout, whether a failed call fails the decision, and how long an answer is reused.
