@@ -1,4 +1,4 @@
-"""Audit events: what was decided and what actually happened, without raw secrets or prompts."""
+"""Audit events: decisions, their executions and late findings, without raw secrets or prompts."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import Field
 
 from donkit_guard.context import FrozenModel, GuardContext
-from donkit_guard.decision import Decision
+from donkit_guard.decision import Decision, Location
+from donkit_guard.findings import FindingClass
 from donkit_guard.payload import Payload, iter_json_leaves
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from donkit_guard.findings import FindingSpan
 
@@ -56,7 +57,38 @@ class ExecutionEvent(FrozenModel):
     occurred_at: datetime
 
 
-AuditEvent = DecisionEvent | ExecutionEvent
+class FindingsEvent(FrozenModel):
+    """Findings that finished after the decision, linked to it by ``decision_id``.
+
+    A detector that no deny, mask or approval rule can use runs in the
+    background, so the decision does not wait for it, or an approval waits only
+    so long; whatever it found is written here once it is done. ``rule_ids``
+    are the audit rules the findings matched. ``unchecked_detectors`` are the
+    detectors that failed, so what they did not flag is unknown rather than
+    clean.
+
+    A decision shows no value of a tool call's arguments while one of its
+    detectors has not reported on them. ``display_args_redacted`` holds the
+    tool-call argument previews with every finding blacked out, once all the
+    detectors of the decision reported, rendered from the arguments as the
+    decision saw them; a value the evaluation did not scan stays blacked out
+    whole. It is ``None`` when the decision event's previews stand. The event is
+    written when the background detectors found something, when one of them
+    failed, or when it carries such previews.
+    """
+
+    event_type: Literal["findings"] = "findings"
+    decision_id: str
+    context: ContextSummary
+    locations: tuple[Location, ...] = ()
+    finding_classes: tuple[FindingClass, ...] = ()
+    rule_ids: tuple[str, ...] = ()
+    unchecked_detectors: tuple[str, ...] = ()
+    display_args_redacted: dict[str, str] | None = None
+    occurred_at: datetime
+
+
+AuditEvent = DecisionEvent | ExecutionEvent | FindingsEvent
 
 
 def summarize_context(ctx: GuardContext) -> ContextSummary:
@@ -100,6 +132,8 @@ def redact_display_args(
     *,
     limit: int = DISPLAY_ARG_LIMIT,
     max_entries: int = DISPLAY_ARG_ENTRIES,
+    redact_all: bool = False,
+    hidden_paths: Collection[str] = (),
 ) -> dict[str, str]:
     """Argument previews for approval cards and audit rows.
 
@@ -108,16 +142,23 @@ def redact_display_args(
     reproduce a secret the detectors found. The number of previews is capped as
     well: a tool called with a large array would otherwise write one entry per
     element into every audit row and approval record.
+
+    A value whose findings the caller cannot vouch for is blacked out whole,
+    keeping only its length, capped at ``limit``, whatever the spans say: every
+    value with ``redact_all``, for a caller whose detectors did not all finish,
+    and the values at the JSON pointers in ``hidden_paths``, for a caller that
+    did not scan them.
     """
     if not arguments:
         return {}
     by_path: dict[str, list[tuple[int, int]]] = {}
-    if payload is not None:
+    if payload is not None and not redact_all:
         segments = payload.by_id()
         for span in spans:
             segment = segments.get(span.segment_id)
             if segment is not None and segment.path:
                 by_path.setdefault(segment.path, []).append((span.start, span.end))
+    hidden = frozenset(hidden_paths)
     previews: dict[str, str] = {}
     leaves = iter_json_leaves(dict(arguments))
     for pointer, leaf in leaves:
@@ -126,8 +167,11 @@ def redact_display_args(
             previews[TRUNCATED_KEY] = f"{remaining} more argument fields not shown"
             break
         text = leaf if isinstance(leaf, str) else str(leaf)
-        text = _mask_ranges(text, by_path.get(pointer, []))
-        if len(text) > limit:
-            text = text[: limit - 1] + "…"
+        if redact_all or pointer in hidden:
+            text = "█" * max(1, min(len(text), limit))
+        else:
+            text = _mask_ranges(text, by_path.get(pointer, []))
+            if len(text) > limit:
+                text = text[: limit - 1] + "…"
         previews[pointer] = text
     return previews

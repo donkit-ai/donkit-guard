@@ -50,6 +50,24 @@ def test_analyze_finds_snils_and_person(client: TestClient) -> None:
         assert 0 <= span.start < span.end <= len(text)
 
 
+@pytest.mark.parametrize("lang", ["de", None])
+def test_unknown_language_is_analyzed_as_english(client: TestClient, lang: str | None) -> None:
+    text = "Please send the contract to John Smith before Friday."
+    english = client.post(
+        "/v1/analyze",
+        json={"segments": [{"id": "s1", "text": text, "lang": "en"}], "deadline_ms": 5000},
+    )
+    response = client.post(
+        "/v1/analyze",
+        json={"segments": [{"id": "s1", "text": text, "lang": lang}], "deadline_ms": 5000},
+    )
+    assert response.status_code == 200
+    parsed = AnalyzeResponse.model_validate(response.json())
+    assert parsed.failed is False
+    assert "PERSON" in {span.entity_type for span in parsed.spans}
+    assert parsed.spans == AnalyzeResponse.model_validate(english.json()).spans
+
+
 def test_analyze_rejects_unknown_fields(client: TestClient) -> None:
     response = client.post("/v1/analyze", json={"segments": [], "unexpected": 1})
     assert response.status_code == 422

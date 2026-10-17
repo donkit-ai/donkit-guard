@@ -11,7 +11,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -34,7 +34,7 @@ class AnalyzeSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     text: str
-    lang: Literal["ru", "en"] = "en"
+    lang: str | None = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -93,7 +93,9 @@ def _analyze_segment(segment: AnalyzeSegment, deadline: float) -> list[AnalyzeSp
     if time.monotonic() >= deadline:
         # The request waited for a worker longer than it is worth; the caller has given up.
         raise TimeoutError("deadline exceeded")
-    results = analyzer.analyze(text=segment.text, language=segment.lang, score_threshold=0.0)  # type: ignore[attr-defined]
+    # The contract accepts any language code; unloaded or missing codes fall back to English.
+    language = segment.lang if segment.lang in SUPPORTED_LANGS else "en"
+    results = analyzer.analyze(text=segment.text, language=language, score_threshold=0.0)  # type: ignore[attr-defined]
     spans: list[AnalyzeSpan] = []
     for result in results:
         canonical = CANONICAL.get(result.entity_type)

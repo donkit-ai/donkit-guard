@@ -25,13 +25,15 @@ jobs:
       - name: Install Poetry
         run: pipx install poetry
       - name: Install
-        run: poetry install --no-interaction
+        run: poetry install --all-extras --no-interaction
       - name: Ruff (lint)
         run: poetry run ruff check .
       - name: Ruff (format)
         run: poetry run ruff format --check .
       - name: Mypy
         run: poetry run mypy
+      - name: Contract (generated file up to date)
+        run: poetry run python scripts/gen_contract.py --check
 
   test:
     name: tests (py${{ matrix.python }})
@@ -48,7 +50,7 @@ jobs:
       - name: Install Poetry
         run: pipx install poetry
       - name: Install
-        run: poetry install --no-interaction
+        run: poetry install --all-extras --no-interaction
       - name: Pytest
         run: poetry run pytest
 
@@ -62,8 +64,8 @@ jobs:
           python-version: "3.12"
       - name: Install Poetry
         run: pipx install poetry
-      - name: Install (runtime deps only)
-        run: poetry install --no-interaction --only main
+      - name: Install (runtime deps and extras only)
+        run: poetry install --only main --all-extras --no-interaction
       - name: Fail on copyleft licenses in the runtime tree
         run: |
           poetry run pip install pip-licenses >/dev/null

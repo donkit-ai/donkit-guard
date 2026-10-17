@@ -1,0 +1,89 @@
+schema_version: 1
+version: "example-detectors-1"
+mode: enforce
+detectors:
+  - kind: pattern
+    id: contract-number
+    title: Contract number
+    class: corporate
+    subtype: CONTRACT_NUMBER
+    patterns:
+      - '\bCN-\d{6}\b'
+    context: ["contract*", "agreement"]
+    exclude: ["sample", "template"]
+    score: 0.9
+    score_without_context: 0.5
+    examples:
+      match:
+        - "Please review contract CN-123456 before Friday"
+        - "The file is CN-654321"
+      no_match:
+        - "Order CN-1234567 has shipped"
+        - "Use the sample contract CN-123456 in the demo"
+  - kind: terms
+    id: project-code-names
+    title: Project code names
+    class: corporate
+    subtype: PROJECT_CODE_NAME
+    terms:
+      - Albatross
+      - "Blue Heron*"
+    score: 0.9
+    examples:
+      match:
+        - "The Albatross launch moves to June"
+        - "Notes on the blue   herons team"
+      no_match:
+        - "An albatrosses flew past the ship"
+        - "Superalbatross is a different product"
+  # A placeholder address: point it at your own service, and see docs/remote-detectors.md for
+  # the contract. The host's CredentialResolver turns the name given as `credential` into a
+  # token for this endpoint; a host without one sends nothing, and the detector fails.
+  - kind: remote
+    id: customer-records
+    title: Customer records service
+    endpoint: https://detector.example.com/v1/analyze
+    credential: customer-records
+    entities:
+      CUSTOMER_ID:
+        class: corporate
+        subtype: CUSTOMER_ID
+    timeout_ms: 1500
+    cache_ttl_s: 600
+layers:
+  - name: tenant
+    rules:
+      - id: contract-numbers-masked
+        description: A contract number that a context word confirms never reaches a model
+        match:
+          action_kind: [llm_request]
+          finding_class: [corporate]
+          finding_subtype: [CONTRACT_NUMBER]
+          min_score: 0.8
+        action: mask
+        reason: "A contract number was found in the payload"
+      - id: contract-numbers-audited
+        description: Weaker candidates, such as a bare number without a context word, are recorded
+        match:
+          finding_class: [corporate]
+          finding_subtype: [CONTRACT_NUMBER]
+        action: audit
+        reason: "A possible contract number was found in the payload"
+      - id: project-code-names-denied
+        description: Project code names stay inside the organization
+        match:
+          action_kind: [llm_request]
+          finding_class: [corporate]
+          finding_subtype: [PROJECT_CODE_NAME]
+        action: deny
+        reason: "A project code name must not leave the organization"
+      # Only an audit rule can use the findings of the remote detector, so the engine runs it
+      # in the background: a slow or failing service never denies a request, and only an
+      # approval card waits for it.
+      - id: customer-records-audited
+        description: The customer records service informs the audit trail only
+        match:
+          finding_class: [corporate]
+          finding_subtype: [CUSTOMER_ID]
+        action: audit
+        reason: "A customer identifier was found in the payload"

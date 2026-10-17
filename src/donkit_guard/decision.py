@@ -93,10 +93,21 @@ class Decision(FrozenModel):
     masked_locations: tuple[Location, ...] = ()
     # Computed once by the engine, which holds the finding spans: a consumer that
     # rebuilt the preview from the arguments alone would print the findings in clear.
+    # Every value is blacked out whole while a detector has not reported on the
+    # arguments, and so is a value the evaluation did not scan: one over the size
+    # limit, one the payload marks uninspected, or one an earlier call scanned.
+    # When a background check is what they wait for, the readable previews follow
+    # in the decision's ``FindingsEvent`` once it reported.
     display_args_redacted: dict[str, str] = Field(default_factory=dict)
     approval: ApprovalPending | None = None
     action_digest: str | None = None
     context_hash: str
+    # Detectors (``name@version``) whose findings this decision did not get: one
+    # that failed or ran out of time where the policy lets the call go on without
+    # it, one that was skipped because no capacity was left, or a background one
+    # that an approval stopped waiting for. Whoever reads the audit trail must not
+    # take the missing findings for a clean payload.
+    unchecked_detectors: tuple[str, ...] = ()
 
     def is_allowed(self) -> bool:
         return self.outcome in (Outcome.ALLOW, Outcome.MASK)

@@ -13,10 +13,13 @@ Every commit must be signed off (`git commit -s`), which adds a `Signed-off-by:`
 ```bash
 git clone git@github.com:donkit-ai/donkit-guard.git
 cd donkit-guard
-poetry install
+poetry install --all-extras
 poetry run pre-commit install
 poetry run pytest
 ```
+
+`--all-extras` installs the optional `re2` and `http` packages. The tests of declared pattern detectors and of
+the HTTP client need them and are skipped without them, so CI runs with every extra.
 
 Python 3.12 or 3.13. Lint and type checks are part of CI: `ruff check`, `ruff format --check`, `mypy --strict`.
 

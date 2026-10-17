@@ -4,44 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from donkit_guard.adapters import MAX_DEADLINE_MS, AnalyzeRequest, AnalyzeSegment, DetectorClient
+from donkit_guard.adapters import AnalyzeRequest, DetectorClient
 from donkit_guard.detectors.base import failed_findings
+from donkit_guard.detectors.remote_common import build_wire, request_deadline_ms
 from donkit_guard.findings import FindingClass, Findings, FindingSpan
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from donkit_guard.payload import Segment
-
-
-def chunk_segment(segment: Segment, max_bytes: int) -> list[tuple[str, int, str]]:
-    """Split a long segment at line boundaries; each chunk keeps its character offset."""
-    text = segment.text or ""
-    if len(text.encode("utf-8")) <= max_bytes:
-        return [(segment.id, 0, text)]
-    chunks: list[tuple[str, int, str]] = []
-    offset = 0
-    lines = text.splitlines(keepends=True)
-    buffer: list[str] = []
-    size = 0
-    start = 0
-    for line in lines:
-        line_size = len(line.encode("utf-8"))
-        if buffer and size + line_size > max_bytes:
-            chunk_text = "".join(buffer)
-            chunks.append((f"{segment.id}#{len(chunks)}", start, chunk_text))
-            start += len(chunk_text)
-            buffer, size = [], 0
-        buffer.append(line)
-        size += line_size
-    if buffer:
-        chunks.append((f"{segment.id}#{len(chunks)}", start, "".join(buffer)))
-    return chunks or [(segment.id, offset, text)]
-
-
-# The service is asked to answer inside a fraction of the runner's own deadline, so
-# that its partial answer still travels back before the runner gives up on it.
-DEADLINE_MARGIN = 0.8
 
 
 class PiiNerDetector:
@@ -69,21 +40,12 @@ class PiiNerDetector:
         )
 
     async def adetect(self, segments: Sequence[Segment], deadline_s: float) -> Findings:
-        wire: list[AnalyzeSegment] = []
-        origin: dict[str, tuple[Segment, int]] = {}
-        scanned = 0
-        for segment in segments:
-            if segment.text is None or segment.uninspected or segment.hashlike():
-                continue
-            scanned += 1
-            for chunk_id, offset, text in chunk_segment(segment, self._max_segment_bytes):
-                wire.append(AnalyzeSegment(id=chunk_id, text=text, lang=self._lang(segment)))
-                origin[chunk_id] = (segment, offset)
-        if not wire:
+        wire = build_wire(segments, self._max_segment_bytes, self._lang)
+        if not wire.segments:
             return Findings(detector=self.name, version=self.version, segments_scanned=0)
         request = AnalyzeRequest(
-            segments=tuple(wire),
-            deadline_ms=max(1, min(MAX_DEADLINE_MS, int(deadline_s * 1000 * DEADLINE_MARGIN))),
+            segments=wire.segments,
+            deadline_ms=request_deadline_ms(deadline_s),
         )
         response = await self._client.analyze(request, deadline_s)
         if response.failed:
@@ -96,10 +58,10 @@ class PiiNerDetector:
             )
         spans: list[FindingSpan] = []
         for hit in response.spans:
-            located = origin.get(hit.segment_id)
+            located = wire.origin.get(hit.segment_id)
             if located is None:
                 continue
-            segment, offset = located
+            segment, offset, _ = located
             spans.append(
                 FindingSpan(
                     segment_id=segment.id,
@@ -117,5 +79,5 @@ class PiiNerDetector:
             version=self.version,
             pattern_set_hash=self.pattern_set_hash,
             spans=tuple(spans),
-            segments_scanned=scanned,
+            segments_scanned=wire.scanned,
         )

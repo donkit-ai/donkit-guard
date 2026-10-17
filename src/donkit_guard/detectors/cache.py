@@ -62,14 +62,28 @@ class DetectorResultCache:
             self._hits += 1
             return spans
 
-    def put(self, detector_key: str, segment_id: str, spans: tuple[FindingSpan, ...]) -> None:
+    def put(
+        self,
+        detector_key: str,
+        segment_id: str,
+        spans: tuple[FindingSpan, ...],
+        ttl_s: float | None = None,
+    ) -> None:
+        """Store the spans found in one segment.
+
+        `ttl_s` is the lifetime of this entry in seconds; `None` takes the cache's default.
+        A lifetime of zero or less stores nothing and leaves the cache as it was.
+        """
+        lifetime = self._ttl_s if ttl_s is None else ttl_s
+        if lifetime <= 0:
+            return
         key = (detector_key, segment_id)
         size = self._size_of(spans)
         with self._lock:
             old = self._entries.pop(key, None)
             if old is not None:
                 self._bytes -= old[2]
-            self._entries[key] = (self._clock() + self._ttl_s, spans, size)
+            self._entries[key] = (self._clock() + lifetime, spans, size)
             self._bytes += size
             while self._bytes > self._max_bytes and self._entries:
                 _, (_, _, evicted_size) = self._entries.popitem(last=False)

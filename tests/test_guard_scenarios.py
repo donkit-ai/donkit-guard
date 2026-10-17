@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import threading
+from typing import TYPE_CHECKING
+
+import pytest
+
 from donkit_guard import (
     Action,
     ActionKind,
@@ -10,6 +16,7 @@ from donkit_guard import (
     ApprovalFlow,
     ApprovalRecord,
     Decision,
+    DeclaredDetectors,
     Destination,
     DestinationTrust,
     EffectClass,
@@ -18,6 +25,7 @@ from donkit_guard import (
     GuardContext,
     Outcome,
     Payload,
+    PolicyBundle,
     PolicyMode,
     Principal,
     PrincipalKind,
@@ -26,17 +34,52 @@ from donkit_guard import (
     SegmentTrust,
     Tenant,
     build_quickstart_guard,
+    load_policy,
 )
-from donkit_guard.audit import DecisionEvent
+from donkit_guard.audit import DecisionEvent, FindingsEvent
+from donkit_guard.declared.regex import RE2_MISSING, re2_available
 from donkit_guard.memory import (
+    FailingDetectorClient,
     InMemoryApprovalStore,
     InMemoryAuditSink,
+    InMemoryPolicySource,
     StaticDetectorClient,
     UnavailableApprovalChannel,
 )
+from donkit_guard.policy import load_default_policy
 
-SECRET = "AKIA5RQTGNW2K4XQZJ7L"
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from donkit_guard.declared import DetectorSpec
+    from donkit_guard.detectors.base import AnyDetector
+
+# An AWS-shaped access key id, assembled at runtime so that secret scanners stay quiet about
+# this file.
+SECRET = "AKIA" + "5RQTGNW2K4XQZJ7L"
 SNILS_NOTE = "клиент СНИЛС 112-233-445 95 просит возврат"
+CONTRACT_POLICY = """\
+version: contracts
+mode: enforce
+detectors:
+  - kind: pattern
+    id: contract-number
+    title: Contract number
+    class: corporate
+    subtype: CONTRACT_NUMBER
+    patterns: ['CN-[0-9]{6}']
+layers:
+  - name: tenant
+    rules:
+      - id: contract-number-mask
+        match: {finding_subtype: [CONTRACT_NUMBER]}
+        action: mask
+        reason: Contract numbers do not reach the model
+"""
+
+# A declared pattern detector needs the "re2" extra. CI installs every extra; a bare install
+# reports the case as skipped.
+needs_re2 = pytest.mark.skipif(not re2_available(), reason=RE2_MISSING)
 
 
 class _PassiveFlow(ApprovalFlow):
@@ -46,10 +89,32 @@ class _PassiveFlow(ApprovalFlow):
         return decision
 
 
+class _RecordingDeclared(DeclaredDetectors):
+    """The declared detectors of a host, noting the tenants and threads they were asked on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tenants: list[str | None] = []
+        self.threads: list[int] = []
+
+    def detectors_for(
+        self, tenant_id: str | None, specs: Sequence[DetectorSpec]
+    ) -> tuple[AnyDetector, ...]:
+        self.tenants.append(tenant_id)
+        self.threads.append(threading.get_ident())
+        return super().detectors_for(tenant_id, specs)
+
+
 def _decision_events(guard: Guard) -> list[DecisionEvent]:
     sink = guard.engine.audit_sink
     assert isinstance(sink, InMemoryAuditSink)
     return [e for e in sink.events if isinstance(e, DecisionEvent)]
+
+
+def _findings_events(guard: Guard) -> list[FindingsEvent]:
+    sink = guard.engine.audit_sink
+    assert isinstance(sink, InMemoryAuditSink)
+    return [e for e in sink.events if isinstance(e, FindingsEvent)]
 
 
 def _ctx(
@@ -99,7 +164,12 @@ async def test_secret_leak_to_model_is_masked_and_pii_is_audited() -> None:
             "клиент СНИЛС 112-233-445 95", source=SegmentSource.USER, trust=SegmentTrust.TRUSTED
         ),
     )
-    assert pii.outcome is Outcome.ALLOW and "pii" in pii.explanation.finding_classes
+    await guard.engine.drain()
+    # Only an audit rule uses personal data sent to the platform, so it is recorded after
+    # the decision instead of in it.
+    (late,) = _findings_events(guard)
+    assert pii.outcome is Outcome.ALLOW and late.decision_id == pii.decision_id
+    assert "pii" in late.finding_classes and "pii-audit" in late.rule_ids
     byok = await guard.authorize(
         _ctx(_llm(DestinationTrust.TENANT)),
         Payload.of_text(
@@ -202,7 +272,11 @@ async def test_secret_inside_tool_arguments_is_denied() -> None:
 async def test_observe_mode_never_blocks_but_reports() -> None:
     guard = build_quickstart_guard(mode=PolicyMode.OBSERVE)
     action = _tool("delete_file", EffectClass.WRITE, {"path": "/tmp/x"})
-    decision = await guard.authorize(_ctx(action), Payload())
+    answer = await guard.authorize(_ctx(action), Payload())
+    await guard.engine.drain()
+    (event,) = _decision_events(guard)
+    decision = event.decision
+    assert answer.outcome is Outcome.ALLOW and decision.decision_id == answer.decision_id
     assert (
         decision.outcome is Outcome.ALLOW
         and decision.would_block
@@ -230,6 +304,71 @@ async def test_approval_card_hides_the_personal_data_it_asks_about() -> None:
     preview = seen[0].display_args_redacted["/note"]
     assert "█" in preview and not any(character.isdigit() for character in preview)
     assert preview == decision.display_args_redacted["/note"]
+
+
+async def test_approval_card_waits_for_the_audit_only_detectors() -> None:
+    seen: list[ApprovalRecord] = []
+
+    def decide(record: ApprovalRecord) -> ApprovalDecisionValue:
+        seen.append(record)
+        return ApprovalDecisionValue.APPROVE
+
+    # Only an audit rule uses the NER findings, and its service is down: the card cannot
+    # tell which values hold personal data, so it shows none of them.
+    guard = build_quickstart_guard(
+        mode=PolicyMode.ENFORCE, ner_client=FailingDetectorClient("down"), decider=decide
+    )
+    action = _tool("crm_update", EffectClass.WRITE, {"note": SNILS_NOTE, "status": "open"})
+    decision = await guard.authorize(
+        _ctx(action),
+        Payload.from_json(
+            action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+        ),
+    )
+    assert decision.outcome is Outcome.ALLOW and decision.explanation.code == "approved"
+    assert decision.unchecked_detectors == ("pii-ner@1",)
+    assert seen[0].display_args_redacted == {"/note": "█" * len(SNILS_NOTE), "/status": "████"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "effect"),
+    [
+        pytest.param("crm_lookup", EffectClass.READ, id="read"),
+        pytest.param("crm_update", EffectClass.WRITE, id="write-approval-card"),
+    ],
+)
+async def test_a_value_too_large_to_scan_is_never_shown(tool: str, effect: EffectClass) -> None:
+    cards: list[ApprovalRecord] = []
+
+    def decide(record: ApprovalRecord) -> ApprovalDecisionValue:
+        cards.append(record)
+        return ApprovalDecisionValue.APPROVE
+
+    guard = build_quickstart_guard(mode=PolicyMode.ENFORCE, decider=decide)
+    note = f"use key {SECRET} to deploy; клиент СНИЛС 112-233-445 95 " + "x" * 300_000
+    action = _tool(tool, effect, {"note": note, "status": "open"})
+    decision = await guard.authorize(
+        _ctx(action),
+        Payload.from_json(
+            action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+        ),
+    )
+    await guard.engine.drain()
+    # Over the size limit the note is not scanned, so no character of it is shown: not in the
+    # decision, its events or the approval card, nor in the previews that follow the decision.
+    assert decision.is_allowed() and decision.uninspected_parts == ("oversized:tool_args/note",)
+    readable = [
+        *(card.display_args_redacted for card in cards),
+        *(e.display_args_redacted for e in _findings_events(guard) if e.display_args_redacted),
+    ]
+    shown = [
+        decision.display_args_redacted,
+        *(event.display_args_redacted for event in _decision_events(guard)),
+        *readable,
+    ]
+    assert all(set(preview["/note"]) == {"█"} for preview in shown)
+    # The value the detectors scanned is shown once all of them have reported on it.
+    assert [preview["/status"] for preview in readable] == ["open"]
 
 
 async def test_an_approved_call_is_audited_under_one_decision_id() -> None:
@@ -293,8 +432,33 @@ async def test_injection_in_tool_result_is_reported_not_enforced() -> None:
     decision = await guard.authorize(
         _ctx(Action(kind=ActionKind.TOOL_RESULT, tool="web_scrape")), result
     )
-    assert (
-        decision.outcome is Outcome.ALLOW
-        and "injection" in decision.explanation.finding_classes
-        and "injection-audit" in decision.explanation.rule_ids
+    await guard.engine.drain()
+    (late,) = _findings_events(guard)
+    assert decision.outcome is Outcome.ALLOW and late.decision_id == decision.decision_id
+    assert "injection" in late.finding_classes and "injection-audit" in late.rule_ids
+
+
+@needs_re2
+async def test_quickstart_masks_a_declared_contract_number() -> None:
+    declared = _RecordingDeclared()
+    guard = build_quickstart_guard(mode=PolicyMode.ENFORCE, declared=declared)
+    # The tenant's document declares the detector and the rule that masks what it finds.
+    tenant_policy = PolicyBundle.compose(
+        [load_default_policy(), load_policy(CONTRACT_POLICY)], mode=PolicyMode.ENFORCE
     )
+    guard.engine.policy_source = InMemoryPolicySource(tenant_policy)
+    async with guard:
+        decision = await guard.authorize(
+            _ctx(_llm()),
+            Payload.of_text(
+                "please review CN-123456 before Friday",
+                source=SegmentSource.USER,
+                trust=SegmentTrust.TRUSTED,
+            ),
+        )
+    assert decision.outcome is Outcome.MASK
+    (masked,) = decision.masked_segments.values()
+    assert re.fullmatch(r"please review <CONTRACT_NUMBER_[0-9a-f]{6}> before Friday", masked)
+    assert declared.tenants == ["acme"]
+    # Built off the event loop, which a long declaration would otherwise stall.
+    assert declared.threads and threading.get_ident() not in declared.threads

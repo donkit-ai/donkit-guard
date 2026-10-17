@@ -1,4 +1,4 @@
-"""Pattern families for the injection heuristic (RU/EN), with normalisation and scoring.
+"""Pattern families for the injection heuristic (RU/EN), with scoring over normalized text.
 
 Ported from the measured spike detector; any change to PATTERNS or the weights
 changes PATTERN_SET_HASH and must be accompanied by a corpus re-run.
@@ -11,9 +11,10 @@ import binascii
 import hashlib
 import json
 import re
-import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from donkit_guard.text import LAT_TO_CYR, ZERO_WIDTH, NormalizedText, normalize
 
 DETECTOR_NAME = "injection-heuristic"
 DETECTOR_VERSION = 1
@@ -26,87 +27,6 @@ CONTENT_SOURCES = frozenset({DOC, TR})  # third-party content: directives to the
 # Third-party content (documents, tool results) has no business addressing the model,
 # so the same directive is weighted higher there than in a user message.
 SOURCE_BOOST = {UM: 1.0, DOC: 1.15, TR: 1.15}
-
-ZERO_WIDTH = frozenset("​‌‍⁠﻿­᠎⁡⁢⁣⁤")
-
-# Lowercase confusables. Unambiguous letters decide the script of a token; the
-# confusables inside it are re-mapped to that script.
-# Classic lowercase confusables (identical glyphs in most fonts): Latin -> Cyrillic.
-LAT_TO_CYR = {"a": "а", "c": "с", "e": "е", "o": "о", "p": "р", "x": "х", "y": "у"}
-# Cyrillic -> Latin: the classic seven plus non-Russian Cyrillic lookalikes (і ј ѕ һ ԁ ԛ ԝ).
-CYR_TO_LAT = {v: k for k, v in LAT_TO_CYR.items()} | {
-    "і": "i",
-    "ј": "j",
-    "ѕ": "s",
-    "һ": "h",
-    "ԁ": "d",
-    "ԛ": "q",
-    "ԝ": "w",
-}
-# Letters that exist in exactly one script decide a token's script.
-CYR_UNAMBIG = set("бвгдёжзийклмнптфцчшщъыьэюя")
-LAT_UNAMBIG = set("bdfghijklmnqrstuvwz")
-
-_WORD = re.compile(r"\w+", re.UNICODE)
-
-
-@dataclass
-class NormalizedText:
-    text: str
-    offsets: list[int]  # offsets[i] -> index in original text
-    zero_width_count: int
-    remapped_tokens: int  # tokens where confusables were re-mapped (mixed script)
-    mixed_script_tokens: int  # tokens with unambiguous letters of BOTH scripts
-
-
-def normalize(text: str) -> NormalizedText:
-    chars: list[str] = []
-    offsets: list[int] = []
-    zw = 0
-    for i, ch in enumerate(text):
-        if ch in ZERO_WIDTH:
-            zw += 1
-            continue
-        for c in unicodedata.normalize("NFKC", ch):
-            for lc in c.lower():
-                chars.append(lc)
-                offsets.append(i)
-    remapped = 0
-    mixed = 0
-    joined = "".join(chars)
-    text_cyr = sum(1 for c in joined if c in CYR_UNAMBIG)
-    text_lat = sum(1 for c in joined if c in LAT_UNAMBIG)
-    for m in _WORD.finditer(joined):
-        tok = m.group(0)
-        if tok.isascii():
-            continue  # pure ASCII: nothing to re-map (also skips base64 / JSON keys)
-        cyr_u = sum(1 for c in tok if c in CYR_UNAMBIG)
-        lat_u = sum(1 for c in tok if c in LAT_UNAMBIG)
-        has_lat_conf = any(c in LAT_TO_CYR for c in tok)
-        has_cyr_conf = any(c in CYR_TO_LAT for c in tok)
-        if cyr_u and lat_u:
-            mixed += 1
-        target: str | None = None
-        if cyr_u > lat_u and has_lat_conf:
-            target = "cyr"
-        elif lat_u > cyr_u and has_cyr_conf:
-            target = "lat"
-        elif cyr_u == lat_u == 0 and has_lat_conf and has_cyr_conf:
-            # only confusables, from both scripts ("cоре"): natural text never does this,
-            # so follow the script of the whole text
-            target = "cyr" if text_cyr >= text_lat else "lat"
-        if target is None:
-            continue
-        table = LAT_TO_CYR if target == "cyr" else CYR_TO_LAT
-        changed = False
-        for k in range(m.start(), m.end()):
-            c = chars[k]
-            if c in table:
-                chars[k] = table[c]
-                changed = True
-        if changed:
-            remapped += 1
-    return NormalizedText("".join(chars), offsets, zw, remapped, mixed)
 
 
 @dataclass(frozen=True)

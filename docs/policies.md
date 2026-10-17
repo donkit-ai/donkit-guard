@@ -54,7 +54,8 @@ value could never match and the rule would silently never fire. Select `write` t
 
 Finding selectors (make the rule depend on detectors): `finding_class` (secret, pii, corporate,
 injection), `finding_subtype` (detector-specific, glob patterns, e.g. `aws-*`, `PERSON`,
-`override`), `min_score`, `segment_trust` (trusted, untrusted).
+`override`, `CONTRACT_*`), `min_score`, `segment_trust` (trusted, untrusted). The selectors also
+decide which detectors run for a call; see [Detectors](#detectors).
 
 ### Scores
 
@@ -76,9 +77,50 @@ injection), `finding_subtype` (detector-specific, glob patterns, e.g. `aws-*`, `
 | `pii-checksum` | passport number with a context word | 0.6 |
 | `pii-ner` | an entity the service reports above its per-entity threshold | 0.5 – 1.0 |
 | `injection-heuristic` | the aggregate suspicion score of a segment and the weight of each hit family, reported from 0.5 up | 0.5 – 1.0 |
+| declared `pattern` | a match with a `context` word within 40 characters, any match when the declaration lists no `context` words, or a value under a `json_keys` key | `score` (default 0.8) |
+| declared `pattern` | a match without a `context` word near it | `score_without_context` (default 0.4) |
+| declared `terms` | an occurrence of a listed term | `score` (default 0.8) |
+| declared `remote` | an entity of a type the declaration maps | the service's own score, clamped to 0 – 1 |
 
 A rule that enforces (`deny`, `mask`, `require_approval`) should carry a `min_score` that
 matches the cost of a false positive; a rule that only records does not need one.
+
+## Detectors
+
+Rules select findings; the detectors that produce them are the built-in ones the host configured
+plus the ones a document declares in its own top-level `detectors:` section: `pattern` (RE2
+patterns with checksums, context words and JSON-key globs), `terms` (word lists) and `remote` (a
+service that speaks the [analyze contract](remote-detectors.md)).
+
+```yaml
+detectors:
+  - kind: pattern
+    id: contract-number
+    title: Contract number
+    class: corporate
+    subtype: CONTRACT_NUMBER
+    patterns: ['\bCN-\d{6}\b']
+layers:
+  - name: tenant
+    rules:
+      - id: mask-contract-numbers
+        match:
+          action_kind: [llm_request]
+          finding_class: [corporate]
+          finding_subtype: [CONTRACT_NUMBER]
+        action: mask
+```
+
+The class and subtype of a declared detector are selectable like those of a built-in one:
+`finding_class` and `finding_subtype` match its findings, and they also decide whether it runs at
+all for a call. A detector runs synchronously when a rule with an action other than `audit` could
+use its findings, in the background when only `audit` rules could, and not at all otherwise. A
+declared detector may report only enforceable classes (`secret`, `pii`, `corporate`).
+
+A document is checked when it is loaded: patterns have to compile, the examples a declaration
+carries have to hold, and a document that carries more than 20 detectors, more than 3 of them
+`remote`, or the same id twice is refused. [detectors.md](detectors.md) has the fields, the limits,
+the optional `re2` and `http` extras and the details of background checks.
 
 ## Combination
 
@@ -103,6 +145,7 @@ set:
 | `unsupported_content` | strictest: one layer refusing content it cannot inspect (`deny`) decides for the bundle |
 | `approval_ttl_s` | the minimum across the documents |
 | `segment_limit_bytes` | the minimum across the documents |
+| `detectors` | the declarations of every document, in document order; a detector id may not repeat across the documents of a bundle |
 | `version` | the documents' versions joined with `+`, recorded in every decision |
 
 ## Default policy
@@ -115,4 +158,10 @@ non-platform destinations (`min_score: 0.5`, so a bare number that merely passes
 audited rather than replaced by a placeholder) and all personal data is audited; injection is
 audited; `read` and `execute` tool calls are allowed (the sandbox bounds execution); `write`,
 `spend` and `egress` tool calls require approval, which also covers an undeclared effect;
-model requests and tool results are allowed.
+model requests and tool results are allowed. The detectors that only its `audit` rules can use
+(personal data anywhere but in a model request to a non-platform destination, injection) run in
+the background, after the decision, so the decision a host receives lists neither the `audit`
+rules they feed (`pii-audit`, `injection-audit`) nor their findings: those come in the decision's
+`FindingsEvent`. A tool call that `tool-side-effect-approval` sends for approval is the exception:
+its approval card waits for every detector, so all of them run before its decision, which then
+lists those rules and findings itself. See [detectors.md](detectors.md#which-detectors-run).
