@@ -20,6 +20,24 @@ def _longest_term(number: int) -> str:
 LONGEST_LIST = tuple(_longest_term(number) for number in range(5000))
 
 
+LEGAL_FORM = "Общество с ограниченной ответственностью"  # noqa: RUF001
+
+
+def _company(number: int) -> str:
+    """A company name under a long legal form, numbered in a hundred widths."""
+    return f"{LEGAL_FORM} «Альфа-{number:0{1 + number % 100}d}»"
+
+
+# A list of company names: they all start with the same long legal form, so every term shares
+# its first eight characters with the others, in a hundred lengths.
+COMPANIES = tuple(_company(number) for number in range(300))
+# A listed company on every other line, and one under the same legal form that is not listed on
+# the lines between.
+COMPANY_LINES = "\n".join(
+    f"{_company(number)}\n{_company(number + 300)}" for number in range(0, 300, 10)
+)
+
+
 def _spec(*terms: str) -> TermsDetectorSpec:
     return TermsDetectorSpec.model_validate(
         {
@@ -32,6 +50,10 @@ def _spec(*terms: str) -> TermsDetectorSpec:
             "score": 0.9,
         }
     )
+
+
+def _segment(text: str) -> Segment:
+    return Segment.of_text(text, source=SegmentSource.USER, trust=SegmentTrust.TRUSTED)
 
 
 @pytest.mark.parametrize(
@@ -122,10 +144,23 @@ def _spec(*terms: str) -> TermsDetectorSpec:
             [LONGEST_LIST[-1]],
             id="the-longest-list-a-declaration-takes",
         ),
+        pytest.param(
+            COMPANIES,
+            COMPANY_LINES,
+            list(COMPANIES[::10]),
+            id="many-lengths-under-one-long-prefix",
+        ),
+        pytest.param(
+            COMPANIES,
+            # Contract prose names the company by its legal form alone, over and over.
+            "Общество обязуется передать, а Покупатель принять товар. " * 4_000,  # noqa: RUF001
+            [],
+            id="the-legal-form-alone-over-and-over",
+        ),
     ],
 )
 def test_terms_detector_cases(terms: tuple[str, ...], text: str, expected: list[str]) -> None:
-    segment = Segment.of_text(text, source=SegmentSource.USER, trust=SegmentTrust.TRUSTED)
+    segment = _segment(text)
     findings = TermsDetector(_spec(*terms)).detect([segment])
 
     assert not findings.failed and findings.segments_scanned == 1
@@ -134,3 +169,29 @@ def test_terms_detector_cases(terms: tuple[str, ...], text: str, expected: list[
     declared = (segment.id, FindingClass.CORPORATE, "CODE_NAME", 0.9, NAME)
     for span in findings.spans:
         assert (span.segment_id, span.cls, span.subtype, span.score, span.detector) == declared
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param("a", id="many-lengths"),
+        # Folding turns this one character into eighteen, so the forms grow far longer than the
+        # 200 characters a term may have: the work is the characters looked up, not the lookups.
+        pytest.param("ﷺ", id="forms-that-fold-long"),
+    ],
+)
+def test_a_list_crafted_to_need_too_much_work_fails_the_scan(tail: str) -> None:
+    # Every character of the text could start one of these terms, and each such place looks up
+    # every length under the prefix they share: they part right after it, so the text they all
+    # start with is the prefix alone, which the text does go on with.
+    crafted = ["!!!!!!!!" + chr(0x41 + length % 26) + tail * length for length in range(1, 192)]
+    detector = TermsDetector(_spec("Альбатрос", *crafted))
+
+    findings = detector.detect([_segment("Запуск проекта Альбатрос"), _segment("!" * 4096)])
+
+    # The whole call fails: the finding in the first segment is not reported either.
+    assert (findings.failed, findings.error, findings.spans) == (
+        True,
+        "terms scan exceeded its work limit",
+        (),
+    )

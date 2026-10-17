@@ -11,8 +11,10 @@ import pytest
 
 from donkit_guard import http as http_module
 from donkit_guard.adapters import AnalyzeRequest, AnalyzeResponse, AnalyzeSegment, AnalyzeSpan
+from donkit_guard.declared import DeclaredDetectors, RemoteDetectorSpec
 from donkit_guard.errors import EndpointRejected
-from donkit_guard.http import HttpAnalyzeClient, HttpConnections, tls_verify
+from donkit_guard.http import HttpAnalyzeClient, HttpConnections
+from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -357,12 +359,46 @@ async def test_connections_keep_one_client_per_origin() -> None:
     assert connections.client_for(ENDPOINT) is None
 
 
-async def test_ca_bundle_path_does_not_trip_the_httpx_deprecation() -> None:
+async def test_ca_bundle_path_does_not_trip_the_httpx_deprecation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _serving()
+
+    async def answer_offline(
+        transport: httpx.AsyncHTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        return server(request)
+
+    # httpx reads the certificate setting only when it builds a transport of its own, so the
+    # clients get no stand-in transport, and httpx's transport answers without a network.
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", answer_offline)
+    contracts = RemoteDetectorSpec.model_validate(
+        {
+            "kind": "remote",
+            "id": "contracts",
+            "title": "Contracts",
+            "endpoint": ENDPOINT,
+            "entities": {"CONTRACT": {"class": "corporate", "subtype": "CONTRACT"}},
+        }
+    )
+    segment = Segment.of_text(
+        "Contract DG-123456 is signed", source=SegmentSource.USER, trust=SegmentTrust.TRUSTED
+    )
+
     with warnings.catch_warnings():
         warnings.filterwarnings("error", message=".*verify.*", category=DeprecationWarning)
-        connections = HttpConnections(verify=tls_verify(certifi.where()))
-        connections.client_for(ENDPOINT)
-    await connections.aclose()
+        client = HttpAnalyzeClient(ENDPOINT, verify=certifi.where())
+        declared = DeclaredDetectors(ca_bundle=certifi.where())
+        (detector,) = declared.detectors_for("tenant-a", [contracts])
+        # The first request makes the connections that the certificate setting goes into.
+        answered = await client.analyze(REQUEST, 1.0)
+        found = await detector.adetect([segment], 1.0)
+    await client.aclose()
+    await declared.aclose()
+
+    assert not answered.failed
+    assert not found.failed
+    assert [str(request.url) for request in server.requests] == [ENDPOINT, ENDPOINT]
 
 
 @pytest.mark.parametrize(

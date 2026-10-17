@@ -1,4 +1,4 @@
-"""Detector protocols and the registry used by process-pool workers.
+"""Detector protocols and the registry from which worker processes rebuild detectors.
 
 `LocalDetector` and `RemoteDetector` fix the attributes every detector has. A detector may
 carry any of the following as well. The runner and the engine read them through the
@@ -116,8 +116,9 @@ def spans_overlap(start: int, end: int, taken: Sequence[tuple[int, int]]) -> boo
     return any(s < end and start < e for s, e in taken)
 
 
-# Built-in local detectors register a zero-argument factory so that a process
-# pool worker can rebuild them by id instead of unpickling instances.
+# Built-in local detectors register a zero-argument factory so that a worker process can
+# rebuild them by id instead of unpickling instances. A local detector that is not registered,
+# such as one built from a policy document or one of the host's own, runs in a thread instead.
 DETECTOR_REGISTRY: dict[str, Callable[[], LocalDetector]] = {}
 
 

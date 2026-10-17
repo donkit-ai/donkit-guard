@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from donkit_guard.declared.factory import DeclaredDetectors, build_local_from_payload
+from donkit_guard.declared.factory import DeclaredDetectors
 from donkit_guard.declared.spec import (
     MAX_DETECTORS,
     MAX_FINDINGS_PER_SEGMENT,
@@ -28,7 +28,6 @@ __all__ = [
     "PatternDetectorSpec",
     "RemoteDetectorSpec",
     "TermsDetectorSpec",
-    "build_local_from_payload",
     "spec_digest",
     "validate_specs",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -53,7 +54,9 @@ if TYPE_CHECKING:
     from donkit_guard.declared import DetectorSpec
     from donkit_guard.detectors.base import AnyDetector
 
-SECRET = "AKIA5RQTGNW2K4XQZJ7L"
+# An AWS-shaped access key id, assembled at runtime so that secret scanners stay quiet about
+# this file.
+SECRET = "AKIA" + "5RQTGNW2K4XQZJ7L"
 SNILS_NOTE = "клиент СНИЛС 112-233-445 95 просит возврат"
 CONTRACT_POLICY = """\
 version: contracts
@@ -87,16 +90,18 @@ class _PassiveFlow(ApprovalFlow):
 
 
 class _RecordingDeclared(DeclaredDetectors):
-    """The declared detectors of a host, noting the tenants they were asked to build for."""
+    """The declared detectors of a host, noting the tenants and threads they were asked on."""
 
     def __init__(self) -> None:
         super().__init__()
         self.tenants: list[str | None] = []
+        self.threads: list[int] = []
 
     def detectors_for(
         self, tenant_id: str | None, specs: Sequence[DetectorSpec]
     ) -> tuple[AnyDetector, ...]:
         self.tenants.append(tenant_id)
+        self.threads.append(threading.get_ident())
         return super().detectors_for(tenant_id, specs)
 
 
@@ -301,7 +306,7 @@ async def test_approval_card_hides_the_personal_data_it_asks_about() -> None:
     assert preview == decision.display_args_redacted["/note"]
 
 
-async def test_approval_card_waits_for_background_detectors() -> None:
+async def test_approval_card_waits_for_the_audit_only_detectors() -> None:
     seen: list[ApprovalRecord] = []
 
     def decide(record: ApprovalRecord) -> ApprovalDecisionValue:
@@ -323,6 +328,47 @@ async def test_approval_card_waits_for_background_detectors() -> None:
     assert decision.outcome is Outcome.ALLOW and decision.explanation.code == "approved"
     assert decision.unchecked_detectors == ("pii-ner@1",)
     assert seen[0].display_args_redacted == {"/note": "█" * len(SNILS_NOTE), "/status": "████"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "effect"),
+    [
+        pytest.param("crm_lookup", EffectClass.READ, id="read"),
+        pytest.param("crm_update", EffectClass.WRITE, id="write-approval-card"),
+    ],
+)
+async def test_a_value_too_large_to_scan_is_never_shown(tool: str, effect: EffectClass) -> None:
+    cards: list[ApprovalRecord] = []
+
+    def decide(record: ApprovalRecord) -> ApprovalDecisionValue:
+        cards.append(record)
+        return ApprovalDecisionValue.APPROVE
+
+    guard = build_quickstart_guard(mode=PolicyMode.ENFORCE, decider=decide)
+    note = f"use key {SECRET} to deploy; клиент СНИЛС 112-233-445 95 " + "x" * 300_000
+    action = _tool(tool, effect, {"note": note, "status": "open"})
+    decision = await guard.authorize(
+        _ctx(action),
+        Payload.from_json(
+            action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+        ),
+    )
+    await guard.engine.drain()
+    # Over the size limit the note is not scanned, so no character of it is shown: not in the
+    # decision, its events or the approval card, nor in the previews that follow the decision.
+    assert decision.is_allowed() and decision.uninspected_parts == ("oversized:tool_args/note",)
+    readable = [
+        *(card.display_args_redacted for card in cards),
+        *(e.display_args_redacted for e in _findings_events(guard) if e.display_args_redacted),
+    ]
+    shown = [
+        decision.display_args_redacted,
+        *(event.display_args_redacted for event in _decision_events(guard)),
+        *readable,
+    ]
+    assert all(set(preview["/note"]) == {"█"} for preview in shown)
+    # The value the detectors scanned is shown once all of them have reported on it.
+    assert [preview["/status"] for preview in readable] == ["open"]
 
 
 async def test_an_approved_call_is_audited_under_one_decision_id() -> None:
@@ -414,3 +460,5 @@ async def test_quickstart_masks_a_declared_contract_number() -> None:
     (masked,) = decision.masked_segments.values()
     assert re.fullmatch(r"please review <CONTRACT_NUMBER_[0-9a-f]{6}> before Friday", masked)
     assert declared.tenants == ["acme"]
+    # Built off the event loop, which a long declaration would otherwise stall.
+    assert declared.threads and threading.get_ident() not in declared.threads

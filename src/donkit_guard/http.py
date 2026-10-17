@@ -41,8 +41,8 @@ HTTP_MISSING = "the HTTP client needs the 'http' extra: pip install 'donkit-guar
 _MIN_TIMEOUT_S = 0.05
 # How much of pydantic's description of an unusable answer is kept in the error text.
 _MAX_REASON_CHARS = 160
-# How much of the error a service reports for itself is passed on. The text is the service's,
-# and it ends up in log lines, audit events and the explanation of a decision.
+# How much of the error a service reports for itself is passed on. Whoever reads the failed
+# findings receives the service's own text, so its length is bounded here.
 _MAX_SERVICE_ERROR_CHARS = 200
 
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 import pytest
 
+from donkit_guard.declared import factory as factory_module
 from donkit_guard.declared import regex as regex_module
-from donkit_guard.declared.factory import DeclaredDetectors, build_local_from_payload
-from donkit_guard.declared.pattern import PatternDetector
+from donkit_guard.declared.factory import DeclaredDetectors
 from donkit_guard.declared.regex import RE2_MISSING, re2_available
 from donkit_guard.declared.remote import DeclaredRemoteDetector
 from donkit_guard.declared.spec import (
@@ -16,13 +18,14 @@ from donkit_guard.declared.spec import (
     RemoteDetectorSpec,
     TermsDetectorSpec,
 )
-from donkit_guard.declared.terms import TermsDetector
 from donkit_guard.declared.validation import validate_specs
 from donkit_guard.detectors.base import detector_cache_scope, detector_key
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from donkit_guard.detectors.base import LocalDetector
 
 if find_spec("httpx") is not None:
     import httpx
@@ -39,15 +42,6 @@ NUMBER = r"ДГ-\d{6}"
 ZERO_WIDTH_SPACE = chr(0x200B)
 MESSAGE = Segment.of_text(
     "Договор ДГ-123456 подписан", source=SegmentSource.USER, trust=SegmentTrust.TRUSTED
-)
-CODE_NAME_MESSAGE = Segment.of_text(
-    "Запуск проекта Альбатрос", source=SegmentSource.USER, trust=SegmentTrust.TRUSTED
-)
-CONTRACT_ID = Segment.of_text(
-    "A-17/2024",
-    source=SegmentSource.TOOL_ARGS,
-    trust=SegmentTrust.TRUSTED,
-    path="/contract_id",
 )
 
 
@@ -151,6 +145,53 @@ def test_detectors_for_caches_per_tenant_and_spec() -> None:
     assert edited.pattern_set_hash != first.pattern_set_hash
     # The runner caches results under these keys: no detector is served another's results.
     assert len({detector_key(d) for d in (first, other_tenant, no_tenant, edited)}) == 4
+
+
+def test_a_build_holds_up_only_the_callers_of_its_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _pattern(json_keys=["contract_id"])
+    other = _pattern(json_keys=["invoice_id"])
+    building, waiting = threading.Event(), threading.Event()
+    builds: list[PatternDetectorSpec | TermsDetectorSpec] = []
+    build = factory_module._build_local
+
+    class Waited(Future[object]):
+        """A build under way, which tells the test once a second caller waits for it."""
+
+        def result(self, timeout: float | None = None) -> object:
+            waiting.set()
+            return super().result(timeout)
+
+    def first_build_waits(
+        declaration: PatternDetectorSpec | TermsDetectorSpec, scope: str
+    ) -> LocalDetector:
+        builds.append(declaration)
+        if declaration == spec and not building.is_set():
+            building.set()
+            # Bounded, so that a build under the lock fails the test instead of hanging it.
+            assert waiting.wait(timeout=10.0)
+        elif declaration == spec:
+            # A second build of the same declaration: let the first one finish.
+            waiting.set()
+        return build(declaration, scope)
+
+    monkeypatch.setattr(factory_module, "_build_local", first_build_waits)
+    monkeypatch.setattr(factory_module, "Future", Waited)
+    declared = DeclaredDetectors()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        slow = pool.submit(declared.detectors_for, "tenant-a", [spec])
+        assert building.wait(timeout=10.0)
+        # Another declaration is built while the first one is under way.
+        (unrelated,) = declared.detectors_for("tenant-a", [other])
+        assert declared.cached_for("tenant-a", [spec]) is None
+        same = pool.submit(declared.detectors_for, "tenant-a", [spec])
+        (first,) = slow.result(timeout=10.0)
+        (second,) = same.result(timeout=10.0)
+
+    assert builds == [spec, other]
+    assert second is first
+    assert declared.cached_for("tenant-a", [spec, other]) == (first, unrelated)
 
 
 @needs_http
@@ -339,24 +380,3 @@ def test_validate_specs_without_re2(
     monkeypatch.setattr(regex_module, "_INSTALLED", False)
 
     assert validate_specs([spec]) == expected
-
-
-@pytest.mark.parametrize(
-    ("spec", "segment"),
-    [
-        pytest.param(_pattern(json_keys=["contract_id"]), CONTRACT_ID, id="pattern"),
-        pytest.param(VALID_TERMS, CODE_NAME_MESSAGE, id="terms"),
-    ],
-)
-def test_build_local_from_payload_round_trip(spec: DetectorSpec, segment: Segment) -> None:
-    (detector,) = DeclaredDetectors().detectors_for("tenant-a", [spec])
-    assert isinstance(detector, PatternDetector | TermsDetector)
-
-    rebuilt = build_local_from_payload(detector.spec_payload())
-
-    # A worker finds what the detector it was handed would have found.
-    assert detector_key(rebuilt) == detector_key(detector)
-    assert rebuilt.detect([segment]).spans
-    assert rebuilt.detect([segment]) == detector.detect([segment])
-    # A worker compiles each declaration once.
-    assert build_local_from_payload(detector.spec_payload()) is rebuilt

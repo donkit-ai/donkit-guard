@@ -74,6 +74,26 @@ def test_redact_all_hides_every_value() -> None:
     }
 
 
+def test_hidden_paths_hide_their_values_whatever_the_spans_say() -> None:
+    args = {"token": "sk-live-ABCDEF123456", "note": "x" * 400, "count": 3}
+    payload = Payload.from_json(args, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED)
+    token_segment = next(s for s in payload.segments if s.path == "/token")
+    span = FindingSpan(
+        segment_id=token_segment.id,
+        path="/token",
+        start=8,
+        end=20,
+        cls=FindingClass.SECRET,
+        subtype="generic",
+        score=1.0,
+        detector="secrets",
+    )
+    previews = redact_display_args(
+        args, [span], payload, limit=64, hidden_paths={"/token", "/note"}
+    )
+    assert previews == {"/token": "█" * 20, "/note": "█" * 64, "/count": "3"}
+
+
 def test_events_serialize(tool_context: GuardContext) -> None:
     decision = Decision(
         outcome=Outcome.DENY,

@@ -58,14 +58,6 @@ class PatternDetector:
         self._exclude = word_pattern(spec.exclude) if spec.exclude else None
         self._json_keys = tuple(glob.lower() for glob in spec.json_keys)
 
-    def spec_payload(self) -> dict[str, object]:
-        """What a worker process rebuilds this detector from: its declaration and scope."""
-        return {
-            "kind": self._spec.kind,
-            "spec": self._spec.model_dump(mode="json", by_alias=True),
-            "cache_scope": self.cache_scope,
-        }
-
     def detect(self, segments: Sequence[Segment]) -> Findings:
         spans: list[FindingSpan] = []
         scanned = 0

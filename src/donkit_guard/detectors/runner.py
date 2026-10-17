@@ -1,19 +1,27 @@
 """Runs detectors over uncached segments with size-dependent budgets, outside the event loop.
 
+With worker processes, the default, a local detector registered in ``DETECTOR_REGISTRY``, as
+every built-in one is, runs in a worker process, which rebuilds it by id. Any other one, such as
+a detector built from a policy document or one of the host's own, exists only as an object in
+this process, so it runs in a thread.
+
 A scan runs in one of two lanes. The foreground lane is for the scans an answer is built on. The
 background lane is for the scans that can wait their turn, such as those whose findings are
 written after the answer went back: its local detectors run on workers of their own, and it
-bounds how many of its scans run at once. A backlog of background scans therefore never holds up
-a foreground scan, and a background scan's deadline starts only once it has its turn.
+bounds how many of its scans run at once. A backlog of background scans therefore never takes a
+worker from a foreground scan, and a background scan's deadline starts only once it has its turn.
+Threads share the interpreter, though: while a detector runs Python code in a thread of either
+lane, the other threads and the event loop run slower (RE2 releases the interpreter lock while it
+matches). Only worker processes, given cores to spare, keep the lanes fully apart.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import threading
 import weakref
-from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import BrokenExecutor, Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -78,45 +86,57 @@ def _worker_detect(registry_key: str, segment_dicts: list[dict[str, Any]]) -> di
     return detector.detect(segments).model_dump(mode="json")
 
 
-def _worker_detect_spec(payload_json: str, segment_dicts: list[dict[str, Any]]) -> dict[str, Any]:
-    """Process-pool entry point: rebuild a declared detector from its spec payload and scan."""
-    # Imported here and not at the top: `donkit_guard.declared` builds on this package, so a
-    # module-level import would be circular. A worker imports it once it is handed a
-    # declared detector.
-    from donkit_guard.declared.factory import build_local_from_payload
-
-    detector = build_local_from_payload(json.loads(payload_json))
-    segments = [Segment.model_validate(d) for d in segment_dicts]
-    return detector.detect(segments).model_dump(mode="json")
-
-
 class _Pool:
-    """The workers of one lane, built on first use."""
+    """Workers of one kind for one lane, made on first use and made anew once retired."""
 
     def __init__(self, kind: ExecutorKind, max_workers: int) -> None:
         self._kind = kind
         self._max_workers = max_workers
+        # The runner may serve event loops on several threads.
+        self._lock = threading.Lock()
         self._executor: Executor | None = None
 
     def executor(self) -> Executor:
-        if self._executor is None:
-            if self._kind is ExecutorKind.PROCESS:
-                self._executor = ProcessPoolExecutor(max_workers=self._max_workers)
-            else:
-                self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
-        return self._executor
+        with self._lock:
+            if self._executor is None:
+                if self._kind is ExecutorKind.PROCESS:
+                    self._executor = ProcessPoolExecutor(max_workers=self._max_workers)
+                else:
+                    self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+            return self._executor
 
-    def retire(self, *, cancel_futures: bool) -> None:
-        """Detach the workers; the next scan lazily builds fresh ones.
+    def retire(self, executor: Executor) -> None:
+        """Stop using ``executor``; the next scan gets fresh workers.
 
-        Cancelling queued work is right when the owner is shutting the runner down and
-        wrong when one detector timed out: the siblings of that scan are queued in the
-        same pool, and a cancelled worker future reaches them as a cancellation of
-        their own scan rather than as a result.
+        The scans still queued for it run to the end: a worker future cancelled under another
+        scan would reach that scan as a cancellation of its own task rather than as a result.
+        Workers already replaced are left alone, so that the scans that failed on the same
+        workers retire them once, and not their successors as well.
         """
-        executor, self._executor = self._executor, None
+        with self._lock:
+            if self._executor is not executor:
+                return
+            self._executor = None
+        executor.shutdown(wait=False, cancel_futures=False)
+
+    def close(self) -> None:
+        """Stop using the workers and cancel the scans still queued for them."""
+        with self._lock:
+            executor, self._executor = self._executor, None
         if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=cancel_futures)
+            executor.shutdown(wait=False, cancel_futures=True)
+
+
+class _Lane:
+    """The workers of one lane, processes and threads, each made when a scan first needs it."""
+
+    def __init__(self, workers: int) -> None:
+        self.processes = _Pool(ExecutorKind.PROCESS, workers)
+        self.threads = _Pool(ExecutorKind.THREAD, workers)
+
+    def close(self) -> None:
+        self.processes.close()
+        self.threads.close()
 
 
 class _Turns:
@@ -136,14 +156,29 @@ class DetectorRunner:
     detector gets one that grows with the size of what it is sent. Results stay cached for
     the `cache_ttl_s` a detector declares, or else for the cache's default lifetime.
 
-    A background scan runs its local detectors on `background_workers` workers of their own,
-    one scan per worker, and keeps at most `max_background_remote` remote calls in flight, so
-    that the detectors' services keep room for the foreground calls. It waits for its turn
-    before its deadline starts, and a local one gets at least `Budget.background_min_ms`. The
-    turns are counted per event loop.
+    Where a local detector runs depends on `executor`:
 
-    A process-pool worker cannot be handed a detector object: it rebuilds a built-in detector
-    from `DETECTOR_REGISTRY` by id, and a declared one from its `spec_payload()`.
+    - `ExecutorKind.PROCESS`: a detector registered in `DETECTOR_REGISTRY`, as the built-in
+      ones are, runs in worker processes, which rebuild it by id. Any other one, such as a
+      detector built from a policy document or one of the host's own, runs in threads.
+    - `ExecutorKind.THREAD`: every one runs in threads.
+    - `ExecutorKind.SYNC`: every one runs on the event loop, in both lanes.
+
+    Each lane has workers of its own: the foreground lane `max_workers` worker processes and
+    as many threads, the background lane `background_workers` of each, by default as many as
+    the foreground lane. That is one more worker for every foreground worker, and with
+    `ExecutorKind.PROCESS` as many more worker processes. Workers are started when a scan
+    first needs them, so a runner never starts the kind it does not use.
+
+    A detector that runs out of time keeps its worker busy until it returns, since a running
+    scan cannot be stopped, and workers that are broken, as a process pool is once one of its
+    processes died, refuse every scan. Either way the scan fails and the lane stops using
+    those workers: the next scan that needs workers of that kind gets fresh ones.
+
+    The background lane runs one scan per worker and keeps at most `max_background_remote`
+    remote calls in flight, so that the detectors' services keep room for the foreground
+    calls. A background scan waits for its turn before its deadline starts, and a local one
+    gets at least `Budget.background_min_ms`. The turns are counted per event loop.
     """
 
     def __init__(
@@ -153,18 +188,22 @@ class DetectorRunner:
         executor: ExecutorKind = ExecutorKind.PROCESS,
         budget: Budget | None = None,
         max_workers: int = 2,
-        background_workers: int = 1,
+        background_workers: int | None = None,
         max_background_remote: int = 16,
     ) -> None:
-        if background_workers < 1 or max_background_remote < 1:
-            # A lane without a single turn would leave every background scan waiting forever.
-            raise ValueError("background_workers and max_background_remote must be at least 1")
+        if background_workers is None:
+            background_workers = max_workers
+        if min(max_workers, background_workers, max_background_remote) < 1:
+            # A lane without a single worker or turn could never run a scan.
+            raise ValueError(
+                "max_workers, background_workers and max_background_remote must be at least 1"
+            )
         self._detectors = tuple(detectors)
         self._cache = cache if cache is not None else DetectorResultCache()
         self._kind = executor
         self._budget = budget if budget is not None else Budget()
-        self._pool = _Pool(executor, max_workers)
-        self._background_pool = _Pool(executor, background_workers)
+        self._foreground = _Lane(max_workers)
+        self._background = _Lane(background_workers)
         self._background_workers = background_workers
         self._max_background_remote = max_background_remote
         # A semaphore belongs to the event loop it is first used on, and the runner may serve
@@ -172,9 +211,6 @@ class DetectorRunner:
         self._turns: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Turns] = (
             weakref.WeakKeyDictionary()
         )
-        # A worker process rebuilds a declared detector from its encoded spec payload, which
-        # for a long list of terms is large: it is encoded once per detector.
-        self._spec_json: weakref.WeakKeyDictionary[LocalDetector, str] = weakref.WeakKeyDictionary()
 
     @property
     def detectors(self) -> tuple[AnyDetector, ...]:
@@ -191,8 +227,8 @@ class DetectorRunner:
 
     def close(self) -> None:
         """Release the workers of both lanes, cancelling the scans still queued for them."""
-        self._pool.retire(cancel_futures=True)
-        self._background_pool.retire(cancel_futures=True)
+        self._foreground.close()
+        self._background.close()
 
     async def run(
         self,
@@ -248,6 +284,8 @@ class DetectorRunner:
             logger.warning("detector %s failed: %s", key, exc)
             return failed_findings(detector, f"{type(exc).__name__}: {exc}")
         if fresh.failed:
+            # Only the detector's id reaches a decision: the reason is for the operator.
+            logger.warning("detector %s reported a failure: %s", key, fresh.error)
             return fresh
         by_segment: dict[str, list[FindingSpan]] = {s.id: [] for s in pending}
         for span in fresh.spans:
@@ -291,50 +329,36 @@ class DetectorRunner:
         if self._kind is ExecutorKind.SYNC:
             return detector.detect(pending)
         if not background:
-            return await self._scan(self._pool, detector, pending, self._budget.local_ms(size))
+            return await self._scan(
+                self._foreground, detector, pending, self._budget.local_ms(size)
+            )
         # One scan per background worker: a scan waiting for its turn is not queued in the
         # pool, so its deadline measures the scan and not the backlog ahead of it.
         async with self._lane_turns().local:
             return await self._scan(
-                self._background_pool, detector, pending, self._budget.background_local_ms(size)
+                self._background, detector, pending, self._budget.background_local_ms(size)
             )
 
     async def _scan(
-        self, pool: _Pool, detector: LocalDetector, pending: list[Segment], deadline_ms: float
+        self, lane: _Lane, detector: LocalDetector, pending: list[Segment], deadline_ms: float
     ) -> Findings:
-        timeout_s = deadline_ms / 1000.0
+        registry_key = detector_id(detector)
+        # A worker process can rebuild a registered detector only.
+        in_process = self._kind is ExecutorKind.PROCESS and registry_key in DETECTOR_REGISTRY
+        pool = lane.processes if in_process else lane.threads
+        executor = pool.executor()
         loop = asyncio.get_running_loop()
         try:
-            if self._kind is not ExecutorKind.PROCESS:
-                return await asyncio.wait_for(
-                    loop.run_in_executor(pool.executor(), detector.detect, pending),
-                    timeout=timeout_s,
-                )
-            raw = await asyncio.wait_for(self._submit(pool, detector, pending), timeout=timeout_s)
-        except TimeoutError:
-            # The await is cancelled, the worker keeps running: it would hold its slot
-            # for every later scan, so this pool is retired instead of reused.
-            pool.retire(cancel_futures=False)
+            async with asyncio.timeout(deadline_ms / 1000.0):
+                if in_process:
+                    segment_dicts = [s.model_dump(mode="json") for s in pending]
+                    raw = await loop.run_in_executor(
+                        executor, _worker_detect, registry_key, segment_dicts
+                    )
+                    return Findings.model_validate(raw)
+                return await loop.run_in_executor(executor, detector.detect, pending)
+        except (TimeoutError, BrokenExecutor):
+            # A worker still busy with the timed-out scan would hold its slot for every later
+            # scan, and a broken pool would fail them all.
+            pool.retire(executor)
             raise
-        return Findings.model_validate(raw)
-
-    def _submit(
-        self, pool: _Pool, detector: LocalDetector, pending: list[Segment]
-    ) -> asyncio.Future[dict[str, Any]]:
-        """Hand a scan to a worker process, with what the worker rebuilds the detector from."""
-        loop = asyncio.get_running_loop()
-        segment_dicts = [s.model_dump(mode="json") for s in pending]
-        spec_payload = getattr(detector, "spec_payload", None)
-        if callable(spec_payload):
-            # A declared detector is built from a policy document, not registered: the worker
-            # rebuilds it from its spec payload.
-            payload_json = self._spec_json.get(detector)
-            if payload_json is None:
-                payload_json = self._spec_json[detector] = json.dumps(spec_payload())
-            return loop.run_in_executor(
-                pool.executor(), _worker_detect_spec, payload_json, segment_dicts
-            )
-        registry_key = detector_id(detector)
-        if registry_key not in DETECTOR_REGISTRY:
-            raise RuntimeError(f"detector {registry_key} is not registered for process execution")
-        return loop.run_in_executor(pool.executor(), _worker_detect, registry_key, segment_dicts)

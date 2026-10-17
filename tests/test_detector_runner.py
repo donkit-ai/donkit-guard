@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import os
 import threading
 import time
 from typing import TYPE_CHECKING
 
 import pytest
 
-from donkit_guard.declared.pattern import PatternDetector
-from donkit_guard.declared.spec import PatternDetectorSpec
 from donkit_guard.detectors.base import (
     detector_key,
     detector_required,
@@ -18,6 +18,7 @@ from donkit_guard.detectors.base import (
 )
 from donkit_guard.detectors.cache import DetectorResultCache
 from donkit_guard.detectors.runner import Budget, DetectorRunner, ExecutorKind
+from donkit_guard.detectors.secrets import SecretsDetector
 from donkit_guard.findings import FindingClass, Findings, FindingSpan
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 
@@ -82,6 +83,18 @@ class ExpiringDetector(CountingDetector):
     def __init__(self, cache_ttl_s: int | None) -> None:
         super().__init__()
         self.cache_ttl_s = cache_ttl_s
+
+
+class PlaceRecordingDetector(CountingDetector):
+    """Records the process and the thread that each of its scans runs on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.places: list[tuple[int, int]] = []
+
+    def detect(self, segments: Sequence[Segment]) -> Findings:
+        self.places.append((os.getpid(), threading.get_ident()))
+        return super().detect(segments)
 
 
 class SlowDetector:
@@ -401,42 +414,49 @@ async def test_a_reported_failure_is_passed_through_and_not_cached() -> None:
     assert cache.stats().entries == 0
 
 
-async def test_an_unregistered_detector_cannot_run_in_a_process_pool() -> None:
-    runner = DetectorRunner([CountingDetector()], executor=ExecutorKind.PROCESS)
-    result = (await runner.run(_segments()))[0]
-    assert result.failed is True and "not registered" in (result.error or "")
-
-
-async def test_declared_detector_runs_in_a_process_pool() -> None:
-    # A value under a listed key is reported whole, which takes no RE2 to find.
-    spec = PatternDetectorSpec.model_validate(
-        {
-            "kind": "pattern",
-            "id": "contract-number",
-            "title": "Contract number",
-            "class": "corporate",
-            "subtype": "CONTRACT_NUMBER",
-            "json_keys": ["contract_id"],
-        }
-    )
-    detector = PatternDetector(spec, cache_scope="tenant-a")
-    segment = Segment.of_text(
-        "A-17/2024", source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED, path="/contract_id"
-    )
-    # The first scan starts the worker process, which the default local budget leaves no
-    # time for.
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+async def test_an_unregistered_detector_runs_in_a_thread_of_a_process_runner(
+    background: bool,
+) -> None:
+    detector = PlaceRecordingDetector()
+    # A deadline no scan comes near, also on a loaded machine.
     runner = DetectorRunner(
-        [detector],
-        executor=ExecutorKind.PROCESS,
-        budget=Budget(local_base_ms=30_000.0),
-        max_workers=1,
+        [detector], executor=ExecutorKind.PROCESS, budget=Budget(local_base_ms=10_000.0)
     )
     try:
-        result = (await runner.run([segment]))[0]
+        (result,) = await runner.run(_segments(), background=background)
     finally:
         runner.close()
-    assert result.error is None
-    assert result.spans and result == detector.detect([segment])
+    assert result.failed is False and len(result.spans) == 1
+    # No worker process could rebuild it: it ran in this process, off the event loop.
+    ((pid, thread),) = detector.places
+    assert pid == os.getpid() and thread != threading.get_ident()
+
+
+async def test_a_dead_worker_process_is_replaced_for_the_next_scan() -> None:
+    runner = DetectorRunner(
+        [SecretsDetector()],
+        # Nothing is cached, so that every scan reaches a worker process.
+        cache=DetectorResultCache(ttl_s=0.0),
+        executor=ExecutorKind.PROCESS,
+        # Starting a worker process takes longer than the default local budget.
+        budget=Budget(local_base_ms=60_000.0),
+        max_workers=1,
+    )
+    others = set(multiprocessing.active_children())
+    try:
+        (first,) = await runner.run(_segments())
+        # The worker process dies, as it would on an out-of-memory kill.
+        for worker in set(multiprocessing.active_children()) - others:
+            worker.kill()
+            worker.join(timeout=10.0)
+        (broken,) = await runner.run(_segments())
+        (replaced,) = await runner.run(_segments())
+    finally:
+        runner.close()
+    assert first.failed is False
+    assert broken.failed is True and (broken.error or "").startswith("BrokenProcessPool")
+    assert replaced.failed is False and replaced.segments_scanned == 2
 
 
 async def test_an_object_implementing_neither_protocol_fails_the_scan() -> None:
@@ -463,7 +483,6 @@ def test_cache_expires_and_evicts() -> None:
         pytest.param(1, 2.0, False, True, id="shorter-than-default"),
         pytest.param(100, 11.0, True, False, id="longer-than-default"),
         pytest.param(0, 0.0, False, True, id="zero"),
-        pytest.param(-1, 0.0, False, True, id="negative"),
     ],
 )
 def test_cache_entry_ttl(

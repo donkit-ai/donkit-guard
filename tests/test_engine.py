@@ -90,6 +90,22 @@ layers:
         match: {action_kind: [tool_call]}
         action: allow
 """
+SECRET_APPROVAL_POLICY = """\
+version: secret-approval
+mode: enforce
+layers:
+  - name: tenant
+    rules:
+      - id: secret-approval
+        match: {action_kind: [tool_call], finding_class: [secret]}
+        action: require_approval
+      - id: pii-audit
+        match: {finding_class: [pii]}
+        action: audit
+      - id: tools-allow
+        match: {action_kind: [tool_call]}
+        action: allow
+"""
 REMOTE_POLICY = """\
 version: remote
 mode: enforce
@@ -120,7 +136,7 @@ class _Probe:
     """A remote detector reporting one finding at the start of every segment it is given.
 
     With ``release`` it answers only once the test sets it; ``running`` is set once it is
-    called.
+    called, and ``cancelled`` once a call is cancelled while it waits.
     """
 
     version = "1"
@@ -139,12 +155,17 @@ class _Probe:
         self._release = release
         self.calls = 0
         self.running = asyncio.Event()
+        self.cancelled = False
 
     async def adetect(self, segments: Sequence[Segment], deadline_s: float) -> Findings:
         self.calls += 1
         self.running.set()
         if self._release is not None:
-            await self._release.wait()
+            try:
+                await self._release.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         spans = tuple(
             FindingSpan(
                 segment_id=s.id,
@@ -629,15 +650,20 @@ async def test_background_findings_are_recorded_under_the_decision_id(
     assert late.rule_ids == ("pii-audit",) and late.finding_classes == (FindingClass.PII,)
 
 
-async def test_findings_of_an_unwritten_decision_are_not_written(
+async def test_an_unwritten_decision_stops_its_background_check(
     llm_context: GuardContext,
 ) -> None:
-    engine, audit = _engine(sink=_DecisionRefusingSink())
+    release = asyncio.Event()
+    pii = _Probe("pii-probe", FindingClass.PII, "PHONE", release)
+    engine, audit = _engine(sink=_DecisionRefusingSink(), detectors=[SecretsDetector(), pii])
     decision = await engine.evaluate(llm_context, _user(SNILS_TEXT))
+    # Released only after the answer, so that a check left running would finish its scan.
+    release.set()
     await engine.drain()
-    # A decision that is not critical stands without its event; its late findings do not.
+    # A decision that is not critical stands without its event; its background check does not,
+    # and nothing of it is written.
     assert decision.outcome is Outcome.ALLOW and not decision.critical
-    assert audit.events == []
+    assert pii.cancelled and audit.events == []
 
 
 @pytest.mark.parametrize(
@@ -682,6 +708,24 @@ async def test_observe_answers_immediately_and_records_the_decision_first(
     assert isinstance(execution, ExecutionEvent) and execution.decision_id == answer.decision_id
 
 
+async def test_an_observed_call_is_recorded_as_it_was_made(tool_context: GuardContext) -> None:
+    engine, audit = _engine(PolicyMode.OBSERVE)
+    arguments: dict[str, Any] = {"note": "hello", "meta": {"tag": "draft"}}
+    ctx = _tool_call(tool_context, "crm_lookup", arguments, effect=EffectClass.READ)
+    payload = Payload.from_json(
+        ctx.action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+    )
+    answer = await engine.evaluate(ctx, payload)
+    assert answer.explanation.code == "observe_deferred"
+    # The host goes on with the call before its deferred evaluation runs.
+    ctx.action.arguments["note"] = SECRET_TEXT
+    ctx.action.arguments["token"] = SECRET
+    arguments["meta"]["tag"] = SECRET_TEXT
+    await engine.drain()
+    (decision,) = _decisions(audit)
+    assert decision.display_args_redacted == {"/note": "hello", "/meta/tag": "draft"}
+
+
 async def test_no_room_for_background_checks(
     llm_context: GuardContext, tool_context: GuardContext
 ) -> None:
@@ -691,6 +735,8 @@ async def test_no_room_for_background_checks(
     skipped = await enforce.evaluate(llm_context, _user(SNILS_TEXT))
     assert skipped.outcome is Outcome.ALLOW and skipped.critical
     assert skipped.unchecked_detectors == ("pii-checksum@1", "injection-heuristic@1")
+    # A tool call that a context rule sends for approval runs every detector before it
+    # answers, so it skips none and its card shows the values.
     card = await enforce.evaluate(
         tool_context,
         Payload.from_json(
@@ -699,8 +745,8 @@ async def test_no_room_for_background_checks(
             trust=SegmentTrust.TRUSTED,
         ),
     )
-    assert card.outcome is Outcome.REQUIRE_APPROVAL
-    assert card.display_args_redacted == {"/path": "█" * len("/tmp/report.txt")}
+    assert card.outcome is Outcome.REQUIRE_APPROVAL and card.unchecked_detectors == ()
+    assert card.display_args_redacted == {"/path": "/tmp/report.txt"}
     # Observe mode answers once its evaluation is done instead.
     observe, audit = _engine(PolicyMode.OBSERVE, settings=no_room)
     answer = await observe.evaluate(llm_context, _user(SNILS_TEXT))
@@ -782,6 +828,76 @@ async def test_previews_wait_for_the_background_detectors(
     assert isinstance(late, FindingsEvent) and late.decision_id == decision.decision_id
     assert late.display_args_redacted == late_previews
     assert late.unchecked_detectors == late_unchecked
+
+
+async def test_a_tool_call_sent_for_approval_by_a_context_rule_runs_every_detector_first(
+    tool_context: GuardContext,
+) -> None:
+    # Under the default policy a write needs an approval whatever the detectors find, and its
+    # card waits for all of them: the audit-only ones run with the others, so what they find
+    # is part of the decision and nothing follows it.
+    engine, audit = _engine()
+    ctx = _tool_call(tool_context, "crm_update", {"note": REFUND_NOTE}, effect=EffectClass.WRITE)
+    payload = Payload.from_json(
+        ctx.action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+    )
+    decision = await engine.evaluate(ctx, payload)
+    await engine.drain()
+    assert decision.outcome is Outcome.REQUIRE_APPROVAL
+    assert "pii-audit" in decision.explanation.rule_ids
+    assert decision.display_args_redacted == {"/note": REFUND_NOTE.replace(SNILS, "█" * len(SNILS))}
+    assert _findings_events(audit) == []
+
+
+async def test_an_approval_waits_for_its_background_check_only_so_long(
+    tool_context: GuardContext,
+) -> None:
+    release = asyncio.Event()
+    pii = _Probe("pii-probe", FindingClass.PII, "PHONE", release)
+    engine, audit = _engine(
+        bundle=PolicyBundle.compose([load_policy(SECRET_APPROVAL_POLICY)]),
+        detectors=[SecretsDetector(), pii],
+        settings=EngineSettings(approval_scan_wait_s=0),
+    )
+    ctx = _tool_call(tool_context, "http_post", {"body": SECRET_TEXT})
+    payload = Payload.from_json(
+        ctx.action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+    )
+    # The secret asks for the approval; only an audit rule uses what the held detector finds.
+    # `wait_for` turns an answer that keeps waiting into a failure instead of a hung test.
+    decision = await asyncio.wait_for(engine.evaluate(ctx, payload), timeout=10.0)
+    assert decision.outcome is Outcome.REQUIRE_APPROVAL
+    assert decision.unchecked_detectors == ("pii-probe@1",)
+    assert decision.display_args_redacted == {"/body": "█" * len(SECRET_TEXT)}
+    release.set()
+    await engine.drain()
+    # The check went on, and its findings event carries the previews the card could not show.
+    (late,) = _findings_events(audit)
+    assert late.decision_id == decision.decision_id and late.rule_ids == ("pii-audit",)
+    assert late.display_args_redacted == {"/body": f"█se key {'█' * len(SECRET)} to deploy"}
+
+
+async def test_late_previews_show_the_arguments_the_decision_was_built_on(
+    tool_context: GuardContext,
+) -> None:
+    release = asyncio.Event()
+    pii = _Probe("pii-probe", FindingClass.PII, "PHONE", release)
+    engine, audit = _engine(detectors=[SecretsDetector(), pii])
+    ctx = _tool_call(tool_context, "crm_lookup", {"note": CLEAN_NOTE}, effect=EffectClass.READ)
+    payload = Payload.from_json(
+        ctx.action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+    )
+    await engine.evaluate(ctx, payload)
+    # The host goes on with its arguments while the check runs: what it changes or adds was
+    # never scanned.
+    arguments = ctx.action.arguments
+    assert arguments is not None
+    arguments["note"] = SECRET_TEXT
+    arguments["token"] = SECRET
+    release.set()
+    await engine.drain()
+    (late,) = _findings_events(audit)
+    assert late.display_args_redacted == {"/note": "█" + CLEAN_NOTE[1:]}
 
 
 async def test_preview_entries_are_capped_by_the_engine_settings(

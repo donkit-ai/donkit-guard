@@ -23,10 +23,11 @@ Offsets are Python `str` offsets everywhere: Unicode code points, `end` exclusiv
 | `pii-ner@1` | `pii` | remote (the `guard-pii` service) | what the service reports: `PERSON`, `PHONE`, `PASSPORT`, `SNILS`, `INN`, `OGRN`, `EMAIL`, `DATE_TIME`, `LOCATION`, `CREDIT_CARD`, `US_SSN` |
 | `injection-heuristic@1` | `injection` | local | the pattern families `override`, `exfil`, `authority`, `persona`, `doc_directive`, `tool_coercion`, `obfuscation`, and `score` for the aggregate suspicion of a segment |
 
-A local detector is code that runs in the guard's process, by default in a worker pool outside
-the event loop. A remote one asks a service over the [analyze contract](remote-detectors.md).
-`injection` is a signal class: rules on it can only `audit`. The score each built-in detector
-gives its findings is listed in [policies.md](policies.md#scores).
+A local detector is code that the guard runs itself, by default outside the event loop: a built-in
+one in worker processes, see [Where detectors run](#where-detectors-run). A remote one asks a
+service over the [analyze contract](remote-detectors.md). `injection` is a signal class: rules on
+it can only `audit`. The score each built-in detector gives its findings is listed in
+[policies.md](policies.md#scores).
 
 ## Declared detectors
 
@@ -175,12 +176,24 @@ A term matches like this:
 
 One segment yields at most 50 findings.
 
-Terms need no extra: they are matched in plain Python, not with RE2. A scan takes time linear in
-the length of the text, times the number of distinct lengths among the terms that share their
-first 8 characters, so the full limit of 5000 terms of 200 characters each works whatever the text
-holds. Building the detector indexes the terms, which takes a fraction of a second for a full list
-and happens when the document is loaded and when the detector is built for a tenant, not on every
-request (see [Caching and tenants](#caching-and-tenants)).
+Terms need no extra: they are matched in plain Python, not with RE2. They are indexed by their
+first 8 characters, and the text is looked up only where a term could start. Each segment a scan
+reads has a work limit: its lookups may cut out and compare 256 characters per character of the
+text as it is matched, normalized and with each run of whitespace counted as one character, plus
+65 536. A lookup costs its length, since normalizing can make a term many times longer than it
+is written. A scan that would need more stops and fails with `terms scan exceeded its work
+limit`, so matching takes time linear in the length of the text and no list can stall it.
+Realistic lists need a small part of the limit: a full list of 5000 terms of 200 characters each
+needs well under 1% of it, and a text that is nothing but a list of company names which all
+start with the same long legal form about a tenth. Only a list built to cost thousands of
+characters at every place a term could start exceeds it. The failure counts like that of any
+detector: when a rule with an action other than `audit` could use the detector, an enforce-mode
+decision is a deny with code `detector_unavailable`, and when only `audit` rules could, the
+detector is listed as unchecked.
+
+Building the detector indexes the terms, which takes a fraction of a second for a full list. It
+happens when the document is loaded and when the detector is built for a tenant, which the engine
+does off the event loop, and not on every request (see [Caching and tenants](#caching-and-tenants)).
 
 ### `remote`
 
@@ -285,7 +298,7 @@ rules that matched the context and select findings (the ones with `finding_class
 | Selection | When | What follows |
 | --- | --- | --- |
 | synchronous | a rule with the action `allow`, `deny`, `mask` or `require_approval` could use its findings | the decision waits for it, and the failure of a required detector fails the decision |
-| background | only `audit` rules could use its findings | the decision does not wait, unless it asks for approval of a tool call; the findings are written afterwards, and a failure never changes the outcome |
+| background | only `audit` rules could use its findings | the decision does not wait for it, except to show an approval card ([Approval cards](#approval-cards)); the findings are written afterwards, and a failure never changes the outcome |
 | unused | no rule could use its findings | it is not run |
 
 A rule *could use* a detector when the detector can report what the rule selects: one of the
@@ -301,31 +314,92 @@ Under the shipped default policy a model request to a platform destination runs 
 synchronously (`secrets-mask`), while `pii-checksum`, `pii-ner` and `injection-heuristic` only feed
 `audit` rules (`pii-audit`, `injection-audit`) and run in the background. The same request to a
 `tenant` or `unknown` destination runs the PII detectors synchronously, because
-`pii-mask-untrusted-destination` then matches the context. A tool call runs `secrets`
-synchronously and the PII and injection detectors in the background, whatever its effect: personal
-data in tool arguments only feeds `pii-audit`.
+`pii-mask-untrusted-destination` then matches the context. A `read` or `execute` tool call runs
+`secrets` synchronously and the PII and injection detectors in the background: personal data in
+tool arguments only feeds `pii-audit`. A tool call with a side effect (`write`, `spend`, `egress`,
+or an effect gated as `write`) runs all of them before its decision, because
+`tool-side-effect-approval` sends it for approval and its approval card waits for every detector
+(see [Approval cards](#approval-cards)).
 
 Because the decision does not wait for them, what background detectors find is not part of it:
 their rules are missing from `explanation.rule_ids`, their findings from
 `explanation.finding_classes` and `explanation.locations`, and they do not make the decision
 `critical` (in enforce mode a critical decision whose event cannot be written is denied). Under the
-default policy that leaves out `injection-audit` and the `injection` class on every call, and
-`pii-audit` and the `pii` class on every call but a model request to a `tenant` or `unknown`
-destination. They come in the decision's `FindingsEvent` instead (see
-[Background checks](#background-checks)); a host that needs them in the decision itself evaluates
-with `defer=False`.
+default policy that leaves `injection-audit` and the `injection` class out of the decision on every
+call but a tool call with a side effect, and `pii-audit` and the `pii` class out of it on every
+call but a tool call with a side effect and a model request to a `tenant` or `unknown` destination.
+They come in the decision's `FindingsEvent` instead (see [Background checks](#background-checks));
+a host that needs them in the decision itself evaluates with `defer=False`.
 
 `Decision.detector_versions` lists the detectors selected for the call, synchronous and
 background, as `name@version` with the hash of the pattern set each used. For a declared detector
 the hash is the digest of its declaration, so a decision can be tied back to the exact text that
 was in force.
 
+## Where detectors run
+
+A `DetectorRunner` runs the local detectors outside the event loop, on workers its `executor`
+chooses:
+
+| `executor` | Built-in local detectors | Declared `pattern` and `terms` detectors, and local detectors of the host's own |
+| --- | --- | --- |
+| `ExecutorKind.PROCESS` (the default) | worker processes | threads |
+| `ExecutorKind.THREAD` | threads | threads |
+| `ExecutorKind.SYNC` | the event loop itself | the event loop itself |
+
+A worker process is not handed a detector object: it rebuilds the detector from
+`DETECTOR_REGISTRY` by its `name@version`, and every built-in local detector is registered there. A
+declared detector exists only as the object built from its document, so it runs in a thread of the
+guard's process even when the built-in ones run in worker processes, and so does any other local
+detector that is not registered. The runner goes by `name@version` alone: a detector of the host's
+own that has the name and version of a built-in one runs in worker processes as that built-in, so
+it needs a name of its own. Remote detectors need no workers; they are awaited on the event loop.
+
+The runner has two lanes, the foreground lane for the scans an answer is built on and the
+[background lane](#the-background-lane). Each has workers of its own and starts each kind of them
+when a scan first needs it: `max_workers` (default 2) worker processes and as many threads for the
+foreground, `background_workers` of each for the background, by default as many as `max_workers`.
+With `ExecutorKind.PROCESS` and the defaults the runner therefore runs up to four worker processes.
+
+A local scan has a deadline that grows with the size of what it is sent, `Budget.local_ms`: 10 ms
+plus 3 ms per KiB by default. In the foreground lane it starts when the scan is handed to the
+workers, so when more scans are handed over at once than the lane has workers for them, from one
+evaluation or from several, the last ones spend part of their time waiting. A host that runs many
+local detectors per call, as documents that declare many `pattern` detectors do, or many calls at
+once, raises `max_workers`. That does not help `terms` detectors: they run in threads and hold the
+interpreter lock (see below), so all of them, of every tenant, take turns on one core, and each
+normalizes the text anew. A document whose deny, mask or approval rules use more than a few
+`terms` detectors over long texts can exceed the foreground budget; it keeps such lists few, or
+leaves them to `audit` rules, which scan in the background. A scan that runs out of time fails, and its worker stays
+busy until the detector returns, since a running scan cannot be stopped. The lane stops using
+those workers, and the next scan that needs workers of that kind gets fresh ones. A detector of the
+host's own therefore has to return: one that never does holds a worker for good, and every scan of
+it that times out holds one more. Broken workers are replaced the same way: a process pool breaks
+when one of its worker processes dies, for example when it is killed for its memory; the scan that
+finds it broken fails, and the next one starts fresh workers.
+
+Where worker processes are started by spawning them, as on macOS and Windows, a worker takes a few
+hundred milliseconds to start, longer than the default budget of a short message. The first scans
+of a fresh pool then time out, and since each timeout retires the pool, it may never warm up. A
+host on such a platform raises `Budget.local_base_ms`, or runs `ExecutorKind.THREAD`. With the
+fork start method, the default on Linux for the Python versions the guard supports, a worker
+starts in a few milliseconds.
+
+Worker processes run apart from the guard's process and from each other, as long as the machine
+has cores to spare. Threads share the interpreter lock, with each other and with the event loop.
+Pattern detectors release it while RE2 matches, but terms detectors and the built-in detectors hold
+it while they run, so such a scan in a thread slows down the event loop and every other scan in a
+thread, in either lane. With `ExecutorKind.SYNC`, which `build_quickstart_guard` uses and which
+suits tests, there are no workers: every local detector runs on the event loop itself, background
+ones included, so a scan holds up whatever the loop runs next, the caller's answer included.
+
 ## Background checks
 
 A detector that only `audit` rules can use scans while the decision goes back to the caller, so a
-slow or failing one never denies the call and holds up only an approval card. Its scan starts just
-before the synchronous scan of the same evaluation and runs in the runner's
-[background lane](#the-background-lane). What it finds is written afterwards:
+slow or failing one never denies the call, and it holds up only an approval card, for a bounded
+time ([Approval cards](#approval-cards)). Its scan starts just before the synchronous scan of the
+same evaluation and runs in the runner's [background lane](#the-background-lane). What it finds is
+written afterwards:
 
 - A `FindingsEvent` (`event_type: "findings"`) is recorded through the `AuditSink` after the
   decision's `DecisionEvent`, under the same `decision_id`. It carries the summary of the context,
@@ -336,21 +410,24 @@ before the synchronous scan of the same evaluation and runs in the runner's
   decision held back while the check ran, or `None` (see [Argument previews](#argument-previews)).
 - It is written when the background detectors found something, when one of them failed, or when
   it carries argument previews, which it does also when the detectors found nothing.
-- Nothing is written when the decision event was not. With `audit=False` every detector runs
-  before the decision is returned, and when the sink fails to write the `DecisionEvent` the
-  findings are dropped with it, so findings never reach the audit trail without their decision.
+- Nothing is written when the decision event was not, so findings never reach the audit trail
+  without their decision. When the sink fails to write the `DecisionEvent`, or the evaluation is
+  cancelled or fails before the event is written, the background scan is cancelled as well. With
+  `audit=False` every detector runs before the decision is returned.
 - A failure of a background detector never denies the decision. Only a decision that asks for
-  approval of a tool call waits for the background detectors, because its approval card shows the
-  arguments; see [Argument previews](#argument-previews).
+  approval of a tool call waits for the background detectors, and only so long, because its
+  approval card shows the arguments; see [Approval cards](#approval-cards).
 - `Decision.unchecked_detectors` lists, as `name@version`, the detectors whose findings the
   decision did not get: an optional or audit-only detector that failed while the decision waited
-  for it, and background detectors that did not start for lack of room. Whoever reads the audit
-  trail must not take the missing findings for a clean payload. Such a decision is `critical`, so
-  in enforce mode its audit event is written fail-closed.
+  for it, background detectors that did not start for lack of room, and the background detectors
+  an approval stopped waiting for. Whoever reads the audit trail must not take the missing findings
+  for a clean payload. Such a decision is `critical`, so in enforce mode its audit event is written
+  fail-closed.
 
 At most `EngineSettings.max_background_checks` (200) background checks run at once, the evaluations
 that observe mode defers included. With no room left the audit-only detectors are not started and
-are listed in `unchecked_detectors`.
+are listed in `unchecked_detectors`. A tool call that a rule which selects no findings sends for
+approval needs no room, since it runs every detector before it answers.
 
 The checks belong to the process. `Engine.drain()` waits until every one of them has finished, for
 tests and for an orderly shutdown. `Engine.aclose()`, which `Guard.aclose()` calls, waits up to
@@ -366,6 +443,42 @@ loses its background checks and its deferred observe-mode decisions when that lo
 host evaluates with `defer=False`, which runs every selected detector before the decision is
 returned, or awaits `Engine.drain()` before the loop ends.
 
+### Approval cards
+
+An approver reads the argument previews on the card before anything happens, so a decision that
+asks for approval of a tool call needs what every detector found. How it gets it depends on the
+rule that asks:
+
+- **A rule that selects no findings**, such as `tool-side-effect-approval` of the default policy.
+  Such a call ends as an approval or a deny whatever the detectors find, so the engine starts no
+  background check for it: every selected detector runs before the decision, in the foreground
+  lane, as with `defer=False`. What the audit-only detectors find is part of the decision, and no
+  `FindingsEvent` follows. Like every synchronous scan, a local one is held to the foreground
+  budget (`Budget.local_ms`): one that runs out of time is listed in `unchecked_detectors`, and the
+  card then shows no value.
+- **A rule that selects findings**, such as a `require_approval` rule on secrets. Whether the call
+  needs approval is known only once the synchronous scan is done, and by then the background check
+  is running. The decision waits for it, for at most `EngineSettings.approval_scan_wait_s`
+  (5 seconds) after the synchronous scan. The check takes its turn in the background lane behind
+  all the other background work there, so under load it can take longer. When it does, the
+  decision goes back without it: the background detectors are listed in `unchecked_detectors`, and
+  the card shows no value. The check goes on, and once it has reported, its `FindingsEvent` carries
+  the readable previews, unless a detector failed.
+
+A host whose approvers have to see the values under load gives the background lane more workers
+(`background_workers`), or the wait more time:
+
+```python
+from donkit_guard.engine import Engine, EngineSettings
+
+engine = Engine(
+    policy_source=policy_source,
+    runner=runner,
+    audit_sink=audit_sink,
+    settings=EngineSettings(approval_scan_wait_s=10.0),
+)
+```
+
 ### The background lane
 
 `DetectorRunner.run(..., background=True)` runs a scan in the runner's background lane. The engine
@@ -373,17 +486,22 @@ uses it for background checks and for the evaluations that observe mode defers; 
 the re-evaluation after an approval among them, take the foreground lane. The background lane
 keeps its work away from the foreground:
 
-- Its local detectors run on workers of their own, `background_workers` of them (default 1), one
-  scan per worker, next to the `max_workers` that serve the foreground. With
-  `ExecutorKind.PROCESS` the runner therefore keeps one more worker process.
+- Its local detectors run on `background_workers` workers of their own, by default as many as the
+  foreground lane's `max_workers`, one scan per worker (see
+  [Where detectors run](#where-detectors-run)). With `ExecutorKind.PROCESS` that is one more worker
+  process for every foreground one.
 - It keeps at most `max_background_remote` (default 16) remote calls in flight, so that the
   detectors' services keep room for the foreground calls.
 - A background scan waits for its turn before its deadline starts, so a backlog never times it
-  out, and a local one gets at least `Budget.background_min_ms` (1000 ms), since no answer waits
-  for it.
+  out, and a local one gets at least `Budget.background_min_ms` (1000 ms), since no answer depends
+  on what it finds.
 
-Background work therefore never delays a foreground scan and never makes one time out. Turns are
-counted per event loop.
+A backlog of background work therefore never takes a worker from a foreground scan. Turns are
+counted per event loop. A background scan that is running can still slow a foreground one down,
+depending on where the two run: worker processes keep apart on cores to spare, scans in threads
+share the interpreter lock, and with `ExecutorKind.SYNC` every scan runs on the event loop. With
+`ExecutorKind.THREAD`, a terms or built-in detector scanning in the background slows every
+foreground scan down and can make one run out of time.
 
 ```python
 from donkit_guard.detectors import (
@@ -399,22 +517,18 @@ runner = DetectorRunner(
     [SecretsDetector(), PiiChecksumDetector(), InjectionHeuristic()],
     executor=ExecutorKind.PROCESS,
     max_workers=2,
-    background_workers=1,
+    background_workers=2,
     max_background_remote=16,
     budget=Budget(background_min_ms=1000.0),
 )
 ```
 
-The lane gives no priority within its own work. The background detectors of an approval card take
-their turn behind the other background checks and the deferred observe-mode evaluations, so a
-backlog of background work slows approval cards down; their deadlines start only once they run, so
-the wait does not fail them. Without a backlog an approval card waits for the longer of the
-synchronous and the background scan, not for both in turn, because the background check starts
-first.
-
-With `ExecutorKind.SYNC`, which `build_quickstart_guard` uses and which suits tests, there are no
-workers: every local detector runs on the event loop itself, background ones included, so a
-background scan holds up whatever the loop runs next, the caller's answer included.
+The lane gives no priority within its own work: the background check of an approval card takes its
+turn behind the other background checks and the deferred observe-mode evaluations, which is why the
+card waits for it at most `EngineSettings.approval_scan_wait_s` ([Approval cards](#approval-cards)).
+The check's deadline starts only once it runs, so the wait does not fail it. Without a backlog the
+card waits for the longer of the synchronous and the background scan, not for both in turn,
+because the background check starts first.
 
 ## Observe mode
 
@@ -445,10 +559,22 @@ detector, background ones included, runs before the decision is returned.
 
 The decision on a tool call carries one bounded preview per argument value,
 `Decision.display_args_redacted`, with the spans the detectors found blacked out; the approval
-card and the `DecisionEvent` carry the same previews. A value is shown only once every selected
-detector has reported on it. Until then the guard cannot tell which values hold findings, so it
-shows none of them: each value is a run of `█` as long as the value (up to
-`EngineSettings.preview_chars`). That happens in three cases:
+card and the `DecisionEvent` carry the same previews. A value is shown only once the evaluation
+scanned it and every selected detector has reported on it. Otherwise it is blacked out whole: a
+run of `█` as long as the value (up to `EngineSettings.preview_chars`).
+
+A value the evaluation did not scan is blacked out in every preview, those of the `FindingsEvent`
+included:
+
+- **A value over the policy's `segment_limit_bytes`.** It is listed in the decision's
+  `uninspected_parts`, for example as `oversized:tool_args/note`.
+- **A value the payload marks uninspected**, such as a file the host passes on without its text.
+- **A value whose segment is listed in `seen_segments`.** An earlier call scanned it, and this
+  evaluation does not have its findings. A host that lists the segments of tool arguments there
+  sees those values blacked out, on the approval card as well.
+
+Until every selected detector has reported, the guard cannot tell which values hold findings, so it
+shows none of them. That happens in four cases:
 
 - **A background check is still running.** This is the usual case for a tool call that asks for
   no approval, because under the default policy the PII and injection detectors scan tool
@@ -463,16 +589,25 @@ shows none of them: each value is a run of `█` as long as the value (up to
   readable previews follow, also when a background check was running as well.
 - **A background detector was not started** for lack of room. It is listed in
   `unchecked_detectors`, and no readable previews follow.
+- **An approval stopped waiting for its background check.** The background detectors are listed
+  in `unchecked_detectors`, and the readable previews follow in the `FindingsEvent` once the check
+  has reported, as they do for a check that is still running.
 
-A decision that asks for approval of a tool call waits for its background detectors instead,
-because the approver reads the card before anything happens: the card shows the values with what
-every detector found blacked out, unless a detector failed or did not start, and then it shows
-none of them. A decision that waits for every detector anyway, with `defer=False` or
-`audit=False`, or the decision that observe mode records later, shows the values the same way.
+A decision that asks for approval of a tool call waits for every detector instead, for a bounded
+time (see [Approval cards](#approval-cards)), because the approver reads the card before anything
+happens: the card shows the values with what every detector found blacked out, unless a detector
+failed, did not start or did not report in time, and then it shows none of them. A decision that
+waits for every detector anyway, with `defer=False` or `audit=False`, or the decision that observe
+mode records later, shows the values the same way.
 
-Previews black out what the evaluation found in the payload. An argument value that the payload
-does not carry, or whose segment is listed in `seen_segments`, is not scanned by this evaluation
-and is shown as it is.
+The previews of a `FindingsEvent` are rendered from a copy of the arguments taken when the
+decision was built, so what the host changes or adds in its arguments after the answer never
+reaches them: they show what the detectors scanned.
+
+Previews black out what the evaluation found in the payload, which the host builds from the
+arguments. The only values a preview can show unscanned are those the payload does not carry at
+all: a value the host left out of it, or one that `Payload.from_json` makes no segment for, such as
+a boolean, a null or a number with fewer than `min_number_digits` (7) digits.
 
 ## Caching and tenants
 
@@ -487,9 +622,16 @@ detector stay for the cache's default lifetime, those of a `remote` detector for
 `DeclaredDetectors` keeps the detectors it built, so a declaration is built (its patterns
 compiled, its terms indexed) once per tenant and not once per request, and the same declaration in
 a document that is loaded anew finds its detector again. Up to `max_cached` (256) detectors are
-kept, the least recently used one going first. The remote detectors share the HTTP connections of
-their `DeclaredDetectors`, one pool per origin, which stay open until `aclose`, so a remote
-detector dropped from the cache keeps working for an evaluation that still holds it.
+kept, the least recently used one going first, and a declaration whose detector was dropped is
+built anew the next time it is needed. A document declares up to 20 detectors, so the default
+keeps those of about a dozen documents that declare all 20; a host with more tenants like that
+raises `max_cached`, counting a few MiB of memory for a terms detector with a full list. A pattern
+or terms detector is built outside the lock that guards what is kept, so a long build holds up no
+other caller, and callers that miss the same declaration at once wait for that one build.
+`cached_for` returns the detectors when every one is built already and never builds, so the
+engine asks it on the event loop and goes to a worker thread only when something is missing. The remote detectors share the HTTP connections of their
+`DeclaredDetectors`, one pool per origin, which stay open until `aclose`, so a remote detector
+dropped from the cache keeps working for an evaluation that still holds it.
 
 ## Wiring in a host
 
@@ -521,6 +663,11 @@ an evaluation. `Engine.aclose()` calls `DeclaredDetectors.aclose()`, which close
 connections its remote detectors share; a remote detector handed out before fails with
 `client closed` from then on.
 
+The engine calls `DeclaredDetectors.detectors_for` in a worker thread (`asyncio.to_thread`), and
+only for a bundle that declares detectors, so that building a long declaration does not stall the
+event loop. A host that subclasses `DeclaredDetectors` keeps `detectors_for` safe to call from
+several threads at once.
+
 An engine and its `DeclaredDetectors` belong to the event loop they are used on. The background
 checks are tasks of that loop, and the HTTP connections are bound to the loop that made them: a
 remote detector called from another loop fails its check when it reuses a connection of the
@@ -545,7 +692,3 @@ its declaration as well.
 | `timeout_ms` | `int` | The deadline of a remote detector, in milliseconds. | the runner's size-based budget |
 | `cache_ttl_s` | `int` | How long the detector's results stay cached, in seconds; `0` turns caching off. | the cache's default lifetime |
 | `required` | `bool` | `False` makes a failure count as an unchecked detector instead of a failed check. | `True` |
-
-A declared `pattern` or `terms` detector also has a `spec_payload()` method. In
-`ExecutorKind.PROCESS` a worker process rebuilds the detector from that payload, because it cannot
-be handed a detector built from a document.

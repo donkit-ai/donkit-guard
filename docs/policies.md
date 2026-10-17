@@ -162,4 +162,6 @@ model requests and tool results are allowed. The detectors that only its `audit`
 (personal data anywhere but in a model request to a non-platform destination, injection) run in
 the background, after the decision, so the decision a host receives lists neither the `audit`
 rules they feed (`pii-audit`, `injection-audit`) nor their findings: those come in the decision's
-`FindingsEvent`. See [detectors.md](detectors.md#which-detectors-run).
+`FindingsEvent`. A tool call that `tool-side-effect-approval` sends for approval is the exception:
+its approval card waits for every detector, so all of them run before its decision, which then
+lists those rules and findings itself. See [detectors.md](detectors.md#which-detectors-run).

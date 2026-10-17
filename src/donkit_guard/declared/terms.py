@@ -7,17 +7,20 @@ take any ending. Terms and text are folded alike by ``donkit_guard.text.normaliz
 findings point into the original text.
 
 Terms are matched in plain Python, without RE2 and without any extra. They are indexed by their
-first characters, and a text is looked up only where a term could start, so a scan takes time
-linear in the length of the text times the number of distinct lengths among the terms that
-share a prefix.
+first characters, and a text is looked up only where a term could start. Every lookup costs the
+characters it cuts out of the text and hashes, against a work limit that grows with the length
+of the text, so matching takes time linear in the text, bounded by that limit: realistic lists
+need a small part of it, and a list crafted to need more fails its scan instead of stalling it.
 """
 
 from __future__ import annotations
 
+import os.path
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from donkit_guard.declared.spec import MAX_FINDINGS_PER_SEGMENT, TermsDetectorSpec, spec_digest
+from donkit_guard.detectors.base import failed_findings
 from donkit_guard.findings import Findings, FindingSpan
 from donkit_guard.text import normalize
 
@@ -29,6 +32,17 @@ if TYPE_CHECKING:
 # Terms are indexed by their first eight characters, or by the whole of a shorter term: few
 # terms of a list share a prefix that long, and few words of a text start with one.
 _PREFIX = 8
+# The characters the lookups of one segment may cut out and compare: so many per character of its
+# text, plus a fixed allowance. A lookup costs its length, not one unit, because folding can make
+# a form many times longer than the term it comes from. A place where a term could start costs
+# at most 36 characters for its prefixes (lengths 1 to 8), so they alone always fit. A prefix the
+# text holds costs what its forms share, and only where the text goes on with that, the lengths
+# of its forms: a text that is nothing but names under one long legal form needs about a tenth of
+# the limit, while a list crafted so that every place costs thousands of characters fails within
+# a few hundred thousand of them.
+_WORK_PER_CHAR = 256
+_WORK_ALLOWANCE = 65_536
+_WORK_LIMIT_ERROR = "terms scan exceeded its work limit"
 # ``\s`` is the whitespace ``str.split`` cuts terms at: made one space, a run of it in the text
 # matches the single space that joins the words of a term.
 _SPACE_RUN = re.compile(r"\s+")
@@ -37,11 +51,20 @@ _SPACE_RUN = re.compile(r"\s+")
 _WORD_START = re.compile(r"(?<![^\W_])\S")
 
 
-def _index(terms: Sequence[str]) -> dict[str, tuple[tuple[int, dict[str, bool]], ...]]:
+class _Forms(NamedTuple):
+    """The forms under one prefix: the text they all start with, and the forms by length."""
+
+    shared: str
+    by_length: tuple[tuple[int, dict[str, bool]], ...]
+
+
+def _index(terms: Sequence[str]) -> dict[str, _Forms]:
     """The forms of ``terms`` by prefix, then by length, longest first.
 
     A form is the words of a term, folded and joined by single spaces; it maps to whether the
-    term ended in ``*``.
+    term ended in ``*``. Names under one legal form share far more than the prefix, so the text
+    all the forms of a prefix start with is kept as well: where the text does not go on with it,
+    none of them can match.
     """
     by_prefix: dict[str, dict[int, dict[str, bool]]] = {}
     for term in terms:
@@ -55,7 +78,12 @@ def _index(terms: Sequence[str]) -> dict[str, tuple[tuple[int, dict[str, bool]],
         # A term without the ``*`` finds part of what the same term with it finds.
         forms[form] = forms.get(form, False) or starred
     return {
-        prefix: tuple((length, by_length[length]) for length in sorted(by_length, reverse=True))
+        prefix: _Forms(
+            shared=os.path.commonprefix([form for forms in by_length.values() for form in forms]),
+            by_length=tuple(
+                (length, by_length[length]) for length in sorted(by_length, reverse=True)
+            ),
+        )
         for prefix, by_length in by_prefix.items()
     }
 
@@ -89,7 +117,13 @@ class TermsDetector:
 
     Occurrences never overlap: the leftmost is reported first and, of the terms that match at
     one place, the longest. A segment yields at most ``MAX_FINDINGS_PER_SEGMENT`` findings.
-    Building it raises ``ValueError`` for a term with no visible characters.
+
+    The lookups of a segment may cut out and compare at most 256 characters per character of its
+    text, plus 65 536; the text counts as written or as folded, with each run of whitespace
+    counted as one character, whichever is shorter. A scan that
+    would need more stops, and ``detect`` reports the call as failed (``terms scan exceeded its
+    work limit``) instead of reporting findings. Building the detector raises ``ValueError`` for
+    a term with no visible characters.
     """
 
     version = "1"
@@ -118,7 +152,10 @@ class TermsDetector:
                 continue
             scanned += 1
             folded = normalize(segment.text)
-            for start, end in self._occurrences(folded.text):
+            occurrences = self._occurrences(folded.text, len(segment.text))
+            if occurrences is None:
+                return failed_findings(self, _WORK_LIMIT_ERROR)
+            for start, end in occurrences:
                 spans.append(
                     FindingSpan(
                         segment_id=segment.id,
@@ -139,24 +176,25 @@ class TermsDetector:
             segments_scanned=scanned,
         )
 
-    def spec_payload(self) -> dict[str, object]:
-        """The declaration and scope a process-pool worker rebuilds this detector from."""
-        return {
-            "kind": "terms",
-            "spec": self._spec.model_dump(mode="json", by_alias=True),
-            "cache_scope": self.cache_scope,
-        }
+    def _occurrences(self, text: str, written: int) -> list[tuple[int, int]] | None:
+        """Spans of the occurrences in folded ``text``, in order.
 
-    def _occurrences(self, text: str) -> list[tuple[int, int]]:
-        """Spans of the occurrences in folded ``text``, in order."""
+        ``written`` is the length of the text as it was written. ``None`` stands for a scan
+        that went past its work limit, which follows the shorter of the two texts: folding can
+        make a text many times longer than the one the scan was handed.
+        """
         collapsed, places = _collapse(text)
+        work_left = _WORK_PER_CHAR * min(len(collapsed), written) + _WORK_ALLOWANCE
         found: list[tuple[int, int]] = []
         last_end = 0
         for match in _WORD_START.finditer(collapsed):
             start = match.start()
             if start < last_end:
                 continue
-            end = self._occurrence_end(collapsed, start)
+            end, work = self._occurrence_end(collapsed, start)
+            work_left -= work
+            if work_left < 0:
+                return None
             if end is None:
                 continue
             # The last character maps back, not the one after it: that one may lie past the end
@@ -167,15 +205,27 @@ class TermsDetector:
             last_end = end
         return found
 
-    def _occurrence_end(self, text: str, start: int) -> int | None:
-        """Where the occurrence that starts at ``start`` of ``text`` ends, if one starts there.
+    def _occurrence_end(self, text: str, start: int) -> tuple[int | None, int]:
+        """Where an occurrence that starts at ``start`` of ``text`` ends, and the work it took.
 
-        Forms are tried longest first, and the first one that matches is the occurrence. A plain
-        form matches where no letter or digit follows it; a ``*`` form matches anyway and runs
-        on over the letters and digits that follow it.
+        The end is ``None`` where no occurrence starts. Forms are tried longest first, and the
+        first one that matches is the occurrence. A plain form matches where no letter or digit
+        follows it; a ``*`` form matches anyway and runs on over the letters and digits that
+        follow it. The work is the number of characters of ``text`` looked at: the prefixes looked
+        up, what the forms of a prefix that is found share, and, where the text goes on with that,
+        the forms under it.
         """
+        work = 0
         for prefix_length in self._prefix_lengths:
-            for length, forms in self._index.get(text[start : start + prefix_length], ()):
+            work += prefix_length
+            under = self._index.get(text[start : start + prefix_length])
+            if under is None:
+                continue
+            work += len(under.shared)
+            if not text.startswith(under.shared, start):
+                continue
+            for length, forms in under.by_length:
+                work += length
                 end = start + length
                 starred = forms.get(text[start:end])
                 if starred is None:
@@ -183,7 +233,7 @@ class TermsDetector:
                 if starred:
                     while _in_word(text, end):
                         end += 1
-                    return end
+                    return end, work
                 if not _in_word(text, end):
-                    return end
-        return None
+                    return end, work
+        return None, work

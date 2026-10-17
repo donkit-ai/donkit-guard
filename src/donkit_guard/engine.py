@@ -7,21 +7,30 @@ matched the context: a detector runs synchronously when a rule with any action b
 could use its findings, in the background when only ``audit`` rules could, and not at all
 otherwise.
 
-A background check never denies the decision, and only a decision that asks for an approval
-waits for it, because the approval card shows the arguments. What it finds is written after the
-decision, as a ``FindingsEvent`` under the decision's id. A decision shows no value of a tool
-call's arguments until every detector has reported on them; when the background check was all
-it lacked, the ``FindingsEvent`` carries the previews. In observe mode, which never blocks, the
-whole evaluation runs in the background and the host is answered at once; an execution event
-recorded meanwhile is written after the decision. Background scans take the runner's background
-lane, so they never hold up a scan an answer waits for. Background work is bounded by
-``EngineSettings.max_background_checks``, and what is still running when the process ends is
-lost.
+A background check never denies the decision. What it finds is written after the decision, as a
+``FindingsEvent`` under the decision's id. A decision shows no value of a tool call's arguments
+until every detector has reported on them, and never one the evaluation did not scan; when the
+background check was all it lacked, the ``FindingsEvent`` carries the previews. An approval card
+shows the arguments, so a decision that asks for an approval waits for its background check, for
+at most ``EngineSettings.approval_scan_wait_s``, and a tool call that a context rule sends for
+approval runs every detector before it answers. In observe mode, which never blocks, the whole
+evaluation runs in the background and the host is answered at once; an execution event recorded
+meanwhile is written after the decision.
+
+Background scans run in the runner's background lane, on workers of their own. A scan that runs
+in a thread, as every local scan does under ``ExecutorKind.THREAD``, still shares the
+interpreter lock with the foreground scans: pattern detectors release it while RE2 matches,
+terms and built-in detectors hold it. Only scans in worker processes, with cores to spare, are
+fully apart from the foreground (``DetectorRunner`` says which detectors ``ExecutorKind.PROCESS``
+runs in them), and ``ExecutorKind.SYNC`` runs every scan inline, on the event loop. Background
+work is bounded by ``EngineSettings.max_background_checks``, and what is still running when the
+process ends is lost.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 import uuid
@@ -88,6 +97,12 @@ class EngineSettings(FrozenModel):
     max_background_checks: int = 200
     # Seconds `Engine.aclose` gives the background checks to finish before cancelling them.
     background_drain_s: float = 5.0
+    # Seconds a decision that asks for an approval waits for its background check, which takes
+    # its turn behind all the work of the runner's background lane. Past that the answer goes
+    # back with every argument value blacked out and the background detectors unchecked; the
+    # check goes on, and its findings event carries the previews. A tool call that a context
+    # rule sends for approval does not wait here: it runs every detector before it answers.
+    approval_scan_wait_s: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -114,40 +129,60 @@ class _Call:
 
 
 @dataclass(frozen=True)
+class _LatePreviews:
+    """What the findings event renders the argument previews it carries from."""
+
+    # A copy taken when the decision was built: the host may change its own arguments after
+    # the answer, and the previews show what the detectors scanned.
+    arguments: dict[str, Any]
+    # The synchronous spans; what the check finds is blacked out along with them.
+    spans: tuple[FindingSpan, ...]
+    # The pointers of the values the evaluation did not scan, which stay blacked out whole.
+    hidden_paths: frozenset[str]
+
+
+@dataclass(frozen=True)
 class _Settlement:
     """How an evaluation ended, as its background check needs to know it."""
 
     # Whether the decision event was written: the findings follow it, or are not written.
     written: bool
     # Set when the decision withheld the argument previews of a tool call only because the
-    # check was still running: the synchronous spans the previews are rendered from, together
-    # with what the check finds.
-    preview_spans: tuple[FindingSpan, ...] | None
+    # check was still running.
+    previews: _LatePreviews | None
 
 
 class _BackgroundCheck:
     """The audit-only detectors of one evaluation, scanning while its decision goes back.
 
-    An engine task waits for ``scan`` and then for ``decided``, the evaluation's word on how
-    its decision ended, so that the findings are written after the decision event or not at
-    all.
+    An engine task waits for ``scan`` to end and then for ``decided``, the evaluation's word on
+    how its decision ended, so that the findings are written after the decision event or not at
+    all. An evaluation that does not write its decision cancels the scan.
     """
 
     def __init__(self, scan: asyncio.Task[list[Findings]]) -> None:
         self.scan = scan
         self.decided: asyncio.Future[_Settlement] = asyncio.get_running_loop().create_future()
 
-    async def findings(self) -> list[Findings] | None:
-        """What the detectors found, or ``None`` when the scan was cancelled or broke down."""
-        await asyncio.wait((self.scan,))
-        if self.scan.cancelled() or self.scan.exception() is not None:
+    @property
+    def running(self) -> bool:
+        return not self.scan.done()
+
+    async def findings(self, timeout_s: float) -> list[Findings] | None:
+        """What the detectors found within ``timeout_s`` seconds.
+
+        ``None`` when the scan was cancelled or broke down, and when it is still running by
+        then. A running scan goes on, and what it finds is recorded as for any background check.
+        """
+        await asyncio.wait((self.scan,), timeout=timeout_s)
+        if self.running or self.scan.cancelled() or self.scan.exception() is not None:
             return None
         return self.scan.result()
 
-    def settle(self, written: bool, preview_spans: tuple[FindingSpan, ...] | None) -> None:
+    def settle(self, written: bool, previews: _LatePreviews | None) -> None:
         """Tell the waiting task whether the decision event was written, and what it withheld."""
         if not self.decided.done():
-            self.decided.set_result(_Settlement(written=written, preview_spans=preview_spans))
+            self.decided.set_result(_Settlement(written=written, previews=previews))
 
 
 def _protected(ctx: GuardContext, effective: EffectClass) -> bool:
@@ -172,7 +207,8 @@ class Engine:
 
     Background checks run as tasks of the event loop the engine is used on: ``drain`` waits
     for them, and ``aclose`` finishes or cancels them before releasing the detectors.
-    ``declared`` builds the detectors that policy documents declare; by default the engine
+    ``declared`` builds the detectors that policy documents declare, and is called in a worker
+    thread, so that building a detector does not stall the event loop; by default the engine
     makes its own, which resolves no credentials and accepts every endpoint.
     """
 
@@ -327,14 +363,16 @@ class Engine:
 
         With ``defer`` the engine leaves for later what the answer does not depend on. The
         detectors only audit rules can use scan in the background, and what they find is
-        written after the decision; a decision that asks for an approval still waits for them,
-        because its approval card shows the arguments. Any other decision on a tool call shows
-        none of the argument values while they scan, and the ``FindingsEvent`` carries the
-        previews once every detector has reported. In observe mode, which never blocks,
-        the whole evaluation runs in the background: the answer is an ``observe_deferred``
-        allow, and the decision written later carries its ``decision_id``. Late findings
-        follow a decision event, so without ``audit``, as with ``defer`` false, every selected
-        detector runs before the decision is returned.
+        written after the decision. A decision that asks for an approval waits for them,
+        because its approval card shows the arguments, but at most
+        ``EngineSettings.approval_scan_wait_s``; a tool call that a context rule sends for
+        approval runs them before it answers, together with the synchronous ones. Any other
+        decision on a tool call shows none of the argument values while they scan, and the
+        ``FindingsEvent`` carries the previews once every detector has reported. In observe
+        mode, which never blocks, the whole evaluation runs in the background: the answer is an
+        ``observe_deferred`` allow, and the decision written later carries its ``decision_id``.
+        Late findings follow a decision event, so without ``audit``, as with ``defer`` false,
+        every selected detector runs before the decision is returned.
         """
         started = time.perf_counter()
         context_hash = ctx.context_hash()
@@ -361,22 +399,34 @@ class Engine:
                 context_hash=context_hash,
                 latency_ms=(time.perf_counter() - started) * 1000.0,
             )
-        try:
-            declared = self.declared.detectors_for(ctx.tenant_id(), bundle.detectors)
-        except (RuntimeError, ValueError) as exc:
-            # A declared detector cannot be built, for example because an extra it needs is
-            # not installed: the policy cannot be applied as written.
-            logger.warning(
-                "declared detectors of policy %s could not be built: %s", bundle.version, exc
-            )
-            return await self._policy_error(
-                ctx,
-                f"the policy's detectors could not be built: {exc}",
-                policy_version=bundle.version,
-                context_hash=context_hash,
-                started=started,
-                audit=audit,
-            )
+        specs = bundle.detectors
+        declared: tuple[AnyDetector, ...] = ()
+        if specs:
+            try:
+                built = self.declared.cached_for(ctx.tenant_id(), specs)
+                # Off the event loop: building a detector compiles its patterns or indexes its
+                # terms, which for a long list takes long enough to stall every task of the loop.
+                declared = (
+                    built
+                    if built is not None
+                    else await asyncio.to_thread(
+                        self.declared.detectors_for, ctx.tenant_id(), specs
+                    )
+                )
+            except (RuntimeError, ValueError) as exc:
+                # A declared detector cannot be built, for example because an extra it needs
+                # is not installed: the policy cannot be applied as written.
+                logger.warning(
+                    "declared detectors of policy %s could not be built: %s", bundle.version, exc
+                )
+                return await self._policy_error(
+                    ctx,
+                    f"the policy's detectors could not be built: {exc}",
+                    policy_version=bundle.version,
+                    context_hash=context_hash,
+                    started=started,
+                    audit=audit,
+                )
         call = _Call(
             ctx=ctx,
             payload=payload,
@@ -390,6 +440,12 @@ class Engine:
         if bundle.mode is PolicyMode.OBSERVE and defer and audit:
             if self._has_capacity():
                 decision_id = uuid.uuid4().hex
+                # The deferred evaluation reads the arguments after the answer, when the host may
+                # have changed them: it describes, digests and previews the call as it was made.
+                action = ctx.action.model_copy(
+                    update={"arguments": copy.deepcopy(ctx.action.arguments)}
+                )
+                call = replace(call, ctx=ctx.model_copy(update={"action": action}))
                 evaluation = self._spawn(self._evaluate_deferred(call, decision_id))
                 # Held while it runs, so that an execution event of the decision can wait for it.
                 self._deferred[decision_id] = evaluation
@@ -428,7 +484,8 @@ class Engine:
 
         The argument previews of a tool call show the values only once every selected
         detector has reported on the scanned segments. While a background check is still
-        running, and when a detector failed or did not run, every value is blacked out whole.
+        running, and when a detector failed or did not run, every value is blacked out whole,
+        and a value whose segment the evaluation did not scan always is.
         """
         ctx, payload, bundle = call.ctx, call.payload, call.bundle
         decision_id = decision_id or uuid.uuid4().hex
@@ -453,6 +510,11 @@ class Engine:
                 finding_rules.append(rule)
             else:
                 verdicts.append(Verdict(rule.id, rule.action, rule.hard, rule.reason))
+        # A tool call that a context rule sends for approval ends as an approval or a deny
+        # whatever the detectors find, and an approval card waits for every detector.
+        approval_due = action.kind is ActionKind.TOOL_CALL and any(
+            v.action is RuleAction.REQUIRE_APPROVAL for v in verdicts
+        )
 
         limit = bundle.segment_limit_bytes
         candidates = payload.new_segments(call.seen_segments)
@@ -465,8 +527,11 @@ class Engine:
         selection = select_detectors(finding_rules, call.detectors)
         selected = selection.sync + selection.background
         # Late findings follow a decision event, and a caller that does not defer wants the
-        # whole decision now: either way every selected detector runs before it goes back.
-        background = selection.background if defer and audit else ()
+        # whole decision now. A tool call that a context rule sends for approval would wait for
+        # the background detectors as well, and in the background lane that is a wait behind
+        # all of the lane's work. In each case every selected detector runs before the
+        # decision goes back, in the evaluation's own lane.
+        background = selection.background if defer and audit and not approval_due else ()
         sync = selection.sync if background else selected
         # Only audit rules can use what these find, so a failure of one never counts against
         # the decision, even when the decision waits for it.
@@ -490,7 +555,7 @@ class Engine:
             else:
                 skipped = [detector_id(detector) for detector in background]
         written = False
-        late_preview_spans: tuple[FindingSpan, ...] | None = None
+        late_previews: _LatePreviews | None = None
         # A started check is told how the evaluation ended, however it ended: its task waits
         # for that word.
         try:
@@ -583,14 +648,19 @@ class Engine:
             preview_spans = list(spans)
             # Whether the background check has yet to report on the scanned segments.
             check_running = check is not None
+            # A detector that failed or did not run keeps the previews hidden, whatever the
+            # background check finds.
+            incomplete = bool(unchecked) or bool(failed)
             if (
                 check is not None
                 and outcome is Outcome.REQUIRE_APPROVAL
                 and action.kind is ActionKind.TOOL_CALL
             ):
-                # An approver reads the argument previews, so they wait for every detector.
-                check_running = False
-                late = await check.findings()
+                # An approver reads the argument previews, so they wait for every detector, but
+                # only so long: the check takes its turn behind all the work of the background
+                # lane. A check that runs out of time goes on as one no decision waits for.
+                late = await check.findings(self._settings.approval_scan_wait_s)
+                check_running = check.running
                 if late is None:
                     unchecked.extend(detector_id(detector) for detector in background)
                 else:
@@ -605,6 +675,11 @@ class Engine:
             )
             display_args: dict[str, str] = {}
             if action.kind is ActionKind.TOOL_CALL:
+                # Nothing the evaluation did not scan is shown: a value over the size limit, one
+                # the payload marks uninspected, or one an earlier call scanned, whose findings
+                # this evaluation does not have.
+                scanned = {segment.id for segment in to_scan}
+                unscanned = frozenset(s.path for s in payload.segments if s.id not in scanned)
                 # A detector that has not reported may have found something in any value, so
                 # no value is shown until every one has.
                 display_args = redact_display_args(
@@ -614,11 +689,16 @@ class Engine:
                     limit=self._settings.preview_chars,
                     max_entries=self._settings.max_preview_entries,
                     redact_all=check_running or bool(unchecked) or bool(failed),
+                    hidden_paths=unscanned,
                 )
-                if check_running and not (unchecked or failed) and action.arguments:
+                if check_running and not incomplete and action.arguments:
                     # The running check is all that holds the previews back, so its findings
                     # event carries them once it has reported.
-                    late_preview_spans = tuple(spans)
+                    late_previews = _LatePreviews(
+                        arguments=copy.deepcopy(action.arguments),
+                        spans=tuple(spans),
+                        hidden_paths=unscanned,
+                    )
             decision = Decision(
                 decision_id=decision_id,
                 outcome=outcome,
@@ -652,7 +732,11 @@ class Engine:
             return answer
         finally:
             if check is not None:
-                check.settle(written, late_preview_spans)
+                if not written:
+                    # What it finds could only follow a decision event, and there is none: the
+                    # sink refused it, or the evaluation was cancelled or broke down before it.
+                    check.scan.cancel()
+                check.settle(written, late_previews)
 
     async def _policy_error(
         self,
@@ -732,23 +816,30 @@ class Engine:
         was running gets them here, rendered from the arguments and payload it decided on,
         once every background detector reported. Nothing is written when there is nothing to
         add (no finding, no failure, no previews), nor when the evaluation ended without
-        writing its decision. Nothing raised here reaches the host.
+        writing its decision, which cancels the scan. Nothing raised here reaches the host.
         """
         try:
-            results = await check.scan
+            # Awaited to its end even once cancelled: `drain` and `aclose` wait for this task,
+            # and the scan must not outlive it.
+            await asyncio.wait((check.scan,))
+            if check.scan.cancelled():
+                return
+            results = check.scan.result()
             failed = [f.detector_id for f in results if f.failed]
             spans = [span for f in results if not f.failed for span in f.spans]
             settled = await check.decided
             if not settled.written:
                 return
             previews: dict[str, str] | None = None
-            if settled.preview_spans is not None and not failed:
+            withheld = settled.previews
+            if withheld is not None and not failed:
                 previews = redact_display_args(
-                    ctx.action.arguments,
-                    [*settled.preview_spans, *spans],
+                    withheld.arguments,
+                    [*withheld.spans, *spans],
                     payload,
                     limit=self._settings.preview_chars,
                     max_entries=self._settings.max_preview_entries,
+                    hidden_paths=withheld.hidden_paths,
                 )
             if not (spans or failed or previews):
                 return

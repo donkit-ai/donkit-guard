@@ -21,9 +21,18 @@ never as code:
   per document, 3 of them remote; 10 patterns of 500 characters; 5000 terms of 200 characters; 20 examples of
   1000 characters), may report only the enforceable classes `secret`, `pii` and `corporate`, and has to keep its
   own `match` and `no_match` examples. A document that fails a check is refused as a whole.
-- **Matching in linear time.** Patterns run on RE2 and terms on a prefix index, both in time linear in the length
-  of the text, so no declaration can stall the process with a crafted expression or term list. A declared
-  detector reports at most 50 findings per segment.
+- **Bounded matching.** Patterns run on RE2, in time linear in the length of the text whatever the expression.
+  Terms are matched on a prefix index under a work limit that grows linearly with the length of the normalized
+  text, so a term list crafted to need more fails its scan (`terms scan exceeded its work limit`) instead of
+  stalling it. That failure counts like that of any detector: when a rule with an action other than `audit` could
+  use the detector, an enforce-mode decision is a deny (`detector_unavailable`). A declared detector reports at
+  most 50 findings per segment.
+- **Run in the host's process.** Declared `pattern` and `terms` detectors run inside the guard's process, in
+  threads (with `ExecutorKind.SYNC`, on the event loop), also when the built-in detectors run in worker processes.
+  The work a crafted declaration causes, up to those bounds, is therefore CPU time of the host process, shared by
+  every tenant. A terms scan also holds the interpreter lock while it runs, and slows the event loop down
+  meanwhile. A scan that runs out of time keeps its thread busy until it returns, which RE2 and the work limit of
+  a terms scan keep bounded.
 - **Isolated per tenant.** Declared detectors are built per tenant, and their cached results are keyed by the
   tenant and the digest of the declaration, so one tenant's results, the answers of a remote service included,
   are never served to another, and an edited declaration never reads the results of its earlier version.
