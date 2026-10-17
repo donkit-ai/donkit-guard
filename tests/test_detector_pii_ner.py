@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from donkit_guard.adapters import AnalyzeRequest, AnalyzeResponse, AnalyzeSpan
-from donkit_guard.detectors.pii_ner import PiiNerDetector, chunk_segment
+from donkit_guard.detectors.pii_ner import PiiNerDetector
+from donkit_guard.detectors.remote_common import chunk_segment
 from donkit_guard.memory import FailingDetectorClient, StaticDetectorClient
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 

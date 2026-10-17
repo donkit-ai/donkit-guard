@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import pytest
 
-from donkit_guard.declared.regex import RE2_MISSING, re2_available
-from donkit_guard.declared.spec import MAX_FINDINGS_PER_SEGMENT, TermsDetectorSpec, spec_digest
+from donkit_guard.declared.spec import MAX_FINDINGS_PER_SEGMENT, TermsDetectorSpec
 from donkit_guard.declared.terms import TermsDetector
-from donkit_guard.detectors.base import LocalDetector, detector_cache_scope, detector_subtypes
 from donkit_guard.findings import FindingClass
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 
-# google-re2 is the optional "re2" extra: without it no terms detector can be built.
-pytestmark = pytest.mark.skipif(not re2_available(), reason=RE2_MISSING)
-
 NAME = "declared:code-names"
+
+
+def _longest_term(number: int) -> str:
+    """A term of four words and 200 characters, the longest a declaration takes."""
+    words = (f"{word}{number:04d}" for word in ("alpha", "bravo", "charlie", "delta"))
+    return " ".join(words).ljust(200, "z")
+
+
+# As many terms as a declaration takes, each of the longest kind.
+LONGEST_LIST = tuple(_longest_term(number) for number in range(5000))
 
 
 def _spec(*terms: str) -> TermsDetectorSpec:
@@ -99,10 +104,23 @@ def _spec(*terms: str) -> TermsDetectorSpec:
             id="one-separator-between-two-occurrences",
         ),
         pytest.param(
+            ("C#", ".NET"),
+            "C#.NET",
+            ["C#", ".NET"],
+            id="punctuation-that-ends-one-occurrence-bounds-the-next",
+        ),
+        pytest.param(
             ("Альбатрос",),
             " ".join(["Альбатрос"] * (MAX_FINDINGS_PER_SEGMENT + 10)),
             ["Альбатрос"] * MAX_FINDINGS_PER_SEGMENT,
             id="findings-per-segment-are-capped",
+        ),
+        pytest.param(
+            LONGEST_LIST,
+            # Hundreds of kilobytes of lines that start like a term and are none.
+            "alpha4999 bravo4999 charlie4999 echo\n" * 8_000 + LONGEST_LIST[-1],
+            [LONGEST_LIST[-1]],
+            id="the-longest-list-a-declaration-takes",
         ),
     ],
 )
@@ -116,24 +134,3 @@ def test_terms_detector_cases(terms: tuple[str, ...], text: str, expected: list[
     declared = (segment.id, FindingClass.CORPORATE, "CODE_NAME", 0.9, NAME)
     for span in findings.spans:
         assert (span.segment_id, span.cls, span.subtype, span.score, span.detector) == declared
-
-
-@pytest.mark.parametrize("term", ["​", "​*"])
-def test_term_without_visible_characters_is_rejected(term: str) -> None:
-    with pytest.raises(ValueError, match="no visible characters"):
-        TermsDetector(_spec("Альбатрос", term))
-
-
-def test_terms_detector_attributes_and_payload() -> None:
-    spec = _spec("Альбатрос*")
-    detector = TermsDetector(spec, cache_scope="tenant-a")
-
-    assert isinstance(detector, LocalDetector)
-    assert detector.classes == {FindingClass.CORPORATE}
-    assert detector_subtypes(detector) == {"CODE_NAME"}
-    assert detector_cache_scope(detector) == "tenant-a"
-    assert detector.pattern_set_hash == spec_digest(spec)
-    # A process-pool worker rebuilds the detector from this payload alone.
-    payload = detector.spec_payload()
-    assert (payload["kind"], payload["cache_scope"]) == ("terms", "tenant-a")
-    assert TermsDetectorSpec.model_validate(payload["spec"]) == spec

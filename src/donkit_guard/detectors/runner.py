@@ -1,10 +1,18 @@
-"""Runs detectors over uncached segments with size-dependent budgets, outside the event loop."""
+"""Runs detectors over uncached segments with size-dependent budgets, outside the event loop.
+
+A scan runs in one of two lanes. The foreground lane is for the scans an answer is built on. The
+background lane is for the scans that can wait their turn, such as those whose findings are
+written after the answer went back: its local detectors run on workers of their own, and it
+bounds how many of its scans run at once. A backlog of background scans therefore never holds up
+a foreground scan, and a background scan's deadline starts only once it has its turn.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import weakref
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -37,9 +45,15 @@ class Budget(FrozenModel):
     remote_base_ms: float = 150.0
     remote_per_kb_ms: float = 40.0
     remote_cap_ms: float = 2000.0
+    # The least a background local scan gets. It delays no answer, so it is not held to the
+    # per-request budget, and a process pool that is still starting gets the time to start.
+    background_min_ms: float = 1000.0
 
     def local_ms(self, size_bytes: int) -> float:
         return self.local_base_ms + self.local_per_kb_ms * (size_bytes / 1024.0)
+
+    def background_local_ms(self, size_bytes: int) -> float:
+        return max(self.local_ms(size_bytes), self.background_min_ms)
 
     def remote_ms(self, size_bytes: int) -> float:
         return min(
@@ -76,6 +90,43 @@ def _worker_detect_spec(payload_json: str, segment_dicts: list[dict[str, Any]]) 
     return detector.detect(segments).model_dump(mode="json")
 
 
+class _Pool:
+    """The workers of one lane, built on first use."""
+
+    def __init__(self, kind: ExecutorKind, max_workers: int) -> None:
+        self._kind = kind
+        self._max_workers = max_workers
+        self._executor: Executor | None = None
+
+    def executor(self) -> Executor:
+        if self._executor is None:
+            if self._kind is ExecutorKind.PROCESS:
+                self._executor = ProcessPoolExecutor(max_workers=self._max_workers)
+            else:
+                self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        return self._executor
+
+    def retire(self, *, cancel_futures: bool) -> None:
+        """Detach the workers; the next scan lazily builds fresh ones.
+
+        Cancelling queued work is right when the owner is shutting the runner down and
+        wrong when one detector timed out: the siblings of that scan are queued in the
+        same pool, and a cancelled worker future reaches them as a cancellation of
+        their own scan rather than as a result.
+        """
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=cancel_futures)
+
+
+class _Turns:
+    """How many background scans run at once on one event loop, local and remote apart."""
+
+    def __init__(self, local: int, remote: int) -> None:
+        self.local = asyncio.Semaphore(local)
+        self.remote = asyncio.Semaphore(remote)
+
+
 class DetectorRunner:
     """Runs detectors over segments, caching what each one finds in each segment.
 
@@ -84,6 +135,12 @@ class DetectorRunner:
     A remote detector that declares `timeout_ms` gets that deadline; any other remote
     detector gets one that grows with the size of what it is sent. Results stay cached for
     the `cache_ttl_s` a detector declares, or else for the cache's default lifetime.
+
+    A background scan runs its local detectors on `background_workers` workers of their own,
+    one scan per worker, and keeps at most `max_background_remote` remote calls in flight, so
+    that the detectors' services keep room for the foreground calls. It waits for its turn
+    before its deadline starts, and a local one gets at least `Budget.background_min_ms`. The
+    turns are counted per event loop.
 
     A process-pool worker cannot be handed a detector object: it rebuilds a built-in detector
     from `DETECTOR_REGISTRY` by id, and a declared one from its `spec_payload()`.
@@ -96,13 +153,28 @@ class DetectorRunner:
         executor: ExecutorKind = ExecutorKind.PROCESS,
         budget: Budget | None = None,
         max_workers: int = 2,
+        background_workers: int = 1,
+        max_background_remote: int = 16,
     ) -> None:
+        if background_workers < 1 or max_background_remote < 1:
+            # A lane without a single turn would leave every background scan waiting forever.
+            raise ValueError("background_workers and max_background_remote must be at least 1")
         self._detectors = tuple(detectors)
         self._cache = cache if cache is not None else DetectorResultCache()
         self._kind = executor
         self._budget = budget if budget is not None else Budget()
-        self._max_workers = max_workers
-        self._pool: Executor | None = None
+        self._pool = _Pool(executor, max_workers)
+        self._background_pool = _Pool(executor, background_workers)
+        self._background_workers = background_workers
+        self._max_background_remote = max_background_remote
+        # A semaphore belongs to the event loop it is first used on, and the runner may serve
+        # more than one loop.
+        self._turns: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Turns] = (
+            weakref.WeakKeyDictionary()
+        )
+        # A worker process rebuilds a declared detector from its encoded spec payload, which
+        # for a long list of terms is large: it is encoded once per detector.
+        self._spec_json: weakref.WeakKeyDictionary[LocalDetector, str] = weakref.WeakKeyDictionary()
 
     @property
     def detectors(self) -> tuple[AnyDetector, ...]:
@@ -117,42 +189,33 @@ class DetectorRunner:
         chosen = self._detectors if detectors is None else detectors
         return {detector_id(d): d.pattern_set_hash for d in chosen}
 
-    def _executor(self) -> Executor:
-        if self._pool is None:
-            if self._kind is ExecutorKind.PROCESS:
-                self._pool = ProcessPoolExecutor(max_workers=self._max_workers)
-            else:
-                self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
-        return self._pool
-
     def close(self) -> None:
-        self._drop_pool(cancel_futures=True)
-
-    def _drop_pool(self, *, cancel_futures: bool) -> None:
-        """Detach the pool; the next scan lazily builds a fresh one.
-
-        Cancelling queued work is right when the owner is shutting the runner down and
-        wrong when one detector timed out: the siblings of that scan are queued in the
-        same pool, and a cancelled worker future reaches them as a cancellation of
-        their own scan rather than as a result.
-        """
-        pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=cancel_futures)
+        """Release the workers of both lanes, cancelling the scans still queued for them."""
+        self._pool.retire(cancel_futures=True)
+        self._background_pool.retire(cancel_futures=True)
 
     async def run(
-        self, segments: Sequence[Segment], detectors: Sequence[AnyDetector] | None = None
+        self,
+        segments: Sequence[Segment],
+        detectors: Sequence[AnyDetector] | None = None,
+        *,
+        background: bool = False,
     ) -> list[Findings]:
         """Scan `segments` with `detectors`, or with the runner's own when none are given.
 
         The given detectors need not be among the runner's own. The result holds one
-        `Findings` per detector, in the order of the detectors.
+        `Findings` per detector, in the order of the detectors. With `background` the scan
+        takes the background lane.
         """
         chosen = self._detectors if detectors is None else detectors
-        results = await asyncio.gather(*(self._run_one(d, segments) for d in chosen))
+        results = await asyncio.gather(
+            *(self._run_one(d, segments, background=background) for d in chosen)
+        )
         return list(results)
 
-    async def _run_one(self, detector: AnyDetector, segments: Sequence[Segment]) -> Findings:
+    async def _run_one(
+        self, detector: AnyDetector, segments: Sequence[Segment], *, background: bool
+    ) -> Findings:
         key = detector_key(detector)
         cached: list[FindingSpan] = []
         pending: list[Segment] = []
@@ -173,14 +236,9 @@ class DetectorRunner:
         size = sum(s.size_bytes for s in pending)
         try:
             if isinstance(detector, RemoteDetector):
-                timeout_ms = detector_timeout_ms(detector)
-                deadline_ms = self._budget.remote_ms(size) if timeout_ms is None else timeout_ms
-                deadline_s = deadline_ms / 1000.0
-                fresh = await asyncio.wait_for(
-                    detector.adetect(pending, deadline_s), timeout=deadline_s
-                )
+                fresh = await self._run_remote(detector, pending, size, background=background)
             elif isinstance(detector, LocalDetector):
-                fresh = await self._run_local(detector, pending, size)
+                fresh = await self._run_local(detector, pending, size, background=background)
             else:
                 raise TypeError(f"{key} implements neither LocalDetector nor RemoteDetector")
         except TimeoutError:
@@ -205,45 +263,78 @@ class DetectorRunner:
             segments_scanned=len(pending),
         )
 
-    async def _run_local(
-        self, detector: LocalDetector, pending: list[Segment], size: int
+    def _lane_turns(self) -> _Turns:
+        """The background lane's turns on the running event loop."""
+        loop = asyncio.get_running_loop()
+        turns = self._turns.get(loop)
+        if turns is None:
+            turns = self._turns[loop] = _Turns(
+                self._background_workers, self._max_background_remote
+            )
+        return turns
+
+    async def _run_remote(
+        self, detector: RemoteDetector, pending: list[Segment], size: int, *, background: bool
     ) -> Findings:
+        timeout_ms = detector_timeout_ms(detector)
+        deadline_ms = self._budget.remote_ms(size) if timeout_ms is None else timeout_ms
+        deadline_s = deadline_ms / 1000.0
+        if not background:
+            return await asyncio.wait_for(detector.adetect(pending, deadline_s), timeout=deadline_s)
+        # The deadline starts with the call, not with the wait for a turn.
+        async with self._lane_turns().remote:
+            return await asyncio.wait_for(detector.adetect(pending, deadline_s), timeout=deadline_s)
+
+    async def _run_local(
+        self, detector: LocalDetector, pending: list[Segment], size: int, *, background: bool
+    ) -> Findings:
+        if self._kind is ExecutorKind.SYNC:
+            return detector.detect(pending)
+        if not background:
+            return await self._scan(self._pool, detector, pending, self._budget.local_ms(size))
+        # One scan per background worker: a scan waiting for its turn is not queued in the
+        # pool, so its deadline measures the scan and not the backlog ahead of it.
+        async with self._lane_turns().local:
+            return await self._scan(
+                self._background_pool, detector, pending, self._budget.background_local_ms(size)
+            )
+
+    async def _scan(
+        self, pool: _Pool, detector: LocalDetector, pending: list[Segment], deadline_ms: float
+    ) -> Findings:
+        timeout_s = deadline_ms / 1000.0
+        loop = asyncio.get_running_loop()
         try:
-            return await self._detect_local(detector, pending, size)
+            if self._kind is not ExecutorKind.PROCESS:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(pool.executor(), detector.detect, pending),
+                    timeout=timeout_s,
+                )
+            raw = await asyncio.wait_for(self._submit(pool, detector, pending), timeout=timeout_s)
         except TimeoutError:
             # The await is cancelled, the worker keeps running: it would hold its slot
             # for every later scan, so this pool is retired instead of reused.
-            self._drop_pool(cancel_futures=False)
+            pool.retire(cancel_futures=False)
             raise
+        return Findings.model_validate(raw)
 
-    async def _detect_local(
-        self, detector: LocalDetector, pending: list[Segment], size: int
-    ) -> Findings:
-        timeout_s = self._budget.local_ms(size) / 1000.0
-        if self._kind is ExecutorKind.SYNC:
-            return detector.detect(pending)
+    def _submit(
+        self, pool: _Pool, detector: LocalDetector, pending: list[Segment]
+    ) -> asyncio.Future[dict[str, Any]]:
+        """Hand a scan to a worker process, with what the worker rebuilds the detector from."""
         loop = asyncio.get_running_loop()
-        if self._kind is ExecutorKind.PROCESS:
-            segment_dicts = [s.model_dump(mode="json") for s in pending]
-            spec_payload = getattr(detector, "spec_payload", None)
-            if callable(spec_payload):
-                # A declared detector is built from a policy document, not registered: the
-                # worker rebuilds it from its spec payload.
-                payload_json = json.dumps(spec_payload())
-                work = loop.run_in_executor(
-                    self._executor(), _worker_detect_spec, payload_json, segment_dicts
-                )
-            else:
-                registry_key = detector_id(detector)
-                if registry_key not in DETECTOR_REGISTRY:
-                    raise RuntimeError(
-                        f"detector {registry_key} is not registered for process execution"
-                    )
-                work = loop.run_in_executor(
-                    self._executor(), _worker_detect, registry_key, segment_dicts
-                )
-            raw = await asyncio.wait_for(work, timeout=timeout_s)
-            return Findings.model_validate(raw)
-        return await asyncio.wait_for(
-            loop.run_in_executor(self._executor(), detector.detect, pending), timeout=timeout_s
-        )
+        segment_dicts = [s.model_dump(mode="json") for s in pending]
+        spec_payload = getattr(detector, "spec_payload", None)
+        if callable(spec_payload):
+            # A declared detector is built from a policy document, not registered: the worker
+            # rebuilds it from its spec payload.
+            payload_json = self._spec_json.get(detector)
+            if payload_json is None:
+                payload_json = self._spec_json[detector] = json.dumps(spec_payload())
+            return loop.run_in_executor(
+                pool.executor(), _worker_detect_spec, payload_json, segment_dicts
+            )
+        registry_key = detector_id(detector)
+        if registry_key not in DETECTOR_REGISTRY:
+            raise RuntimeError(f"detector {registry_key} is not registered for process execution")
+        return loop.run_in_executor(pool.executor(), _worker_detect, registry_key, segment_dicts)

@@ -65,6 +65,13 @@ class FindingsEvent(FrozenModel):
     written here once it is done. ``rule_ids`` are the audit rules the findings
     matched. ``unchecked_detectors`` are the detectors that failed, so what they
     did not flag is unknown rather than clean.
+
+    A decision shows no value of a tool call's arguments while one of its
+    detectors has not reported on them. ``display_args_redacted`` holds the
+    tool-call argument previews with every finding blacked out, once all the
+    detectors of the decision reported; it is ``None`` when the decision event's
+    previews stand. The event is written when the background detectors found
+    something, when one of them failed, or when it carries such previews.
     """
 
     event_type: Literal["findings"] = "findings"
@@ -74,6 +81,7 @@ class FindingsEvent(FrozenModel):
     finding_classes: tuple[FindingClass, ...] = ()
     rule_ids: tuple[str, ...] = ()
     unchecked_detectors: tuple[str, ...] = ()
+    display_args_redacted: dict[str, str] | None = None
     occurred_at: datetime
 
 

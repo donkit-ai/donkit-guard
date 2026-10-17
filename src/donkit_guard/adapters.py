@@ -104,22 +104,27 @@ class CredentialResolver(Protocol):
     """Maps a credential name from a policy document to the secret a host holds for it.
 
     A document names the credential a remote detector needs but never carries its value.
-    ``tenant_id`` lets a host keep a separate secret per tenant. Return ``None`` when there
-    is no such credential; the detector then fails without sending a request.
+    ``tenant_id`` lets a host keep a separate secret per tenant. ``endpoint`` is the URL the
+    token would be sent to, so that a host can bind a credential to the service it was
+    issued for and keep it from any other address a document names. Return ``None`` when
+    there is no such credential, or none for that endpoint; the detector then fails without
+    sending a request.
     """
 
-    async def token(self, tenant_id: str | None, name: str) -> str | None: ...
+    async def token(self, tenant_id: str | None, name: str, endpoint: str) -> str | None: ...
 
 
 class EnvCredentialResolver:
-    """Reads credentials from environment variables, the same for every tenant.
+    """Reads credentials from environment variables, the same for every tenant and endpoint.
 
     The credential ``my-service`` is read from ``DONKIT_GUARD_CREDENTIAL_MY_SERVICE``:
-    the name upper-cased, with ``-`` turned into ``_``. A host that keeps its secrets per
-    tenant provides its own ``CredentialResolver``.
+    the name upper-cased, with ``-`` turned into ``_``. It suits a host that writes every
+    policy document itself, because any document may name any of these variables and have
+    its value sent to the endpoint the document declares. A host that accepts documents from
+    its tenants, or keeps its secrets per tenant, provides its own ``CredentialResolver``.
     """
 
-    async def token(self, tenant_id: str | None, name: str) -> str | None:
+    async def token(self, tenant_id: str | None, name: str, endpoint: str) -> str | None:
         return os.environ.get("DONKIT_GUARD_CREDENTIAL_" + name.upper().replace("-", "_"))
 
 

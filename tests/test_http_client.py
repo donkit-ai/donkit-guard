@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gzip
 import json
 import warnings
+from functools import partial
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any
 
@@ -10,7 +12,7 @@ import pytest
 from donkit_guard import http as http_module
 from donkit_guard.adapters import AnalyzeRequest, AnalyzeResponse, AnalyzeSegment, AnalyzeSpan
 from donkit_guard.errors import EndpointRejected
-from donkit_guard.http import HttpAnalyzeClient
+from donkit_guard.http import HttpAnalyzeClient, HttpConnections, tls_verify
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -33,6 +35,9 @@ REQUEST = AnalyzeRequest(
     segments=(AnalyzeSegment(id="s1", text="Contract DG-123456 is signed", lang=None),),
     deadline_ms=800,
 )
+# The answer of a service that found nothing, and the size cap of the cases that test it.
+CLEAN = AnalyzeResponse().model_dump_json().encode()
+CAP = 512
 
 
 class Server:
@@ -60,15 +65,34 @@ class RecordingGuard:
         self.urls.append(url)
 
 
-def _serving(
-    content: bytes,
+def _answer(
+    content: bytes = CLEAN,
     status: int = 200,
     headers: dict[str, str] | None = None,
-) -> Server:
-    def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, headers=headers, content=content)
+    *,
+    in_memory: bool = False,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A service that always gives this answer.
 
-    return Server(respond)
+    The body is streamed, as it arrives from the network, unless ``in_memory`` hands it over
+    already read, as a transport that answers from memory does.
+    """
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if in_memory:
+            return httpx.Response(status, headers=headers, content=content)
+        return httpx.Response(status, headers=headers, stream=httpx.ByteStream(content))
+
+    return respond
+
+
+def _serving(content: bytes = CLEAN) -> Server:
+    return Server(_answer(content))
+
+
+def _padded(size: int) -> bytes:
+    """The clean answer padded with whitespace, which JSON allows, to ``size`` bytes."""
+    return CLEAN + b" " * (size - len(CLEAN))
 
 
 def _token(value: str | None) -> Callable[[], Awaitable[str | None]]:
@@ -76,6 +100,10 @@ def _token(value: str | None) -> Callable[[], Awaitable[str | None]]:
         return value
 
     return token
+
+
+async def _unread_token() -> str | None:
+    raise AssertionError("the token was looked up")
 
 
 async def _analyze(
@@ -118,23 +146,49 @@ async def test_posts_the_request_and_returns_the_spans() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "headers", "content", "error"),
+    ("respond", "error"),
     [
-        (302, {"Location": "https://elsewhere.example/v1/analyze"}, b"", "HTTP 302"),
-        (500, {}, BODY_MARK.encode(), "HTTP 500"),
-        (200, {}, b"x" * 1000, "response too large"),
+        pytest.param(
+            _answer(b"", 302, {"Location": "https://elsewhere.example/v1/analyze"}),
+            "HTTP 302",
+            id="redirect-is-not-followed",
+        ),
+        pytest.param(_answer(BODY_MARK.encode(), 500), "HTTP 500", id="server-error"),
+        pytest.param(_answer(_padded(CAP)), None, id="at-the-cap"),
+        pytest.param(_answer(_padded(CAP + 1)), "response too large", id="past-the-cap"),
+        pytest.param(
+            _answer(_padded(CAP + 1), in_memory=True),
+            "response too large",
+            id="past-the-cap-read-in-memory",
+        ),
+        pytest.param(
+            # A small compressed body could unpack into far more than the cap.
+            _answer(gzip.compress(CLEAN), headers={"Content-Encoding": "gzip"}),
+            "unsupported content encoding",
+            id="compressed",
+        ),
+        pytest.param(
+            _answer(headers={"Content-Encoding": "identity"}), None, id="identity-encoding"
+        ),
+        pytest.param(
+            _answer(json.dumps({"failed": True, "error": "e" * 300}).encode()),
+            "e" * 200,
+            id="long-service-error-is-cut",
+        ),
     ],
-    ids=["redirect-is-not-followed", "server-error", "oversized"],
 )
-async def test_answers_that_are_not_usable_fail(
-    status: int, headers: dict[str, str], content: bytes, error: str
+async def test_answer_outcomes(
+    respond: Callable[[httpx.Request], httpx.Response], error: str | None
 ) -> None:
-    server = _serving(content, status, headers)
+    server = Server(respond)
 
-    response = await _analyze(server, token=_token(TOKEN), max_response_bytes=256)
+    response = await _analyze(server, token=_token(TOKEN), max_response_bytes=CAP)
 
-    assert response.failed and response.error == error and response.spans == ()
-    assert len(server.requests) == 1
+    assert (response.failed, response.error) == (error is not None, error)
+    assert response.spans == ()
+    # The client asks for an uncompressed answer, whose size it can bound as it arrives.
+    (sent,) = server.requests
+    assert sent.headers["accept-encoding"] == "identity"
 
 
 @pytest.mark.parametrize("failure", ["ConnectError", "ReadTimeout", "RemoteProtocolError"])
@@ -177,49 +231,81 @@ async def test_invalid_answer_reports_where_it_went_wrong() -> None:
     assert BODY_MARK not in response.error
 
 
-async def test_answer_exactly_at_the_cap_is_accepted() -> None:
-    body = AnalyzeResponse().model_dump_json().encode()
-
-    within = await _analyze(_serving(body), max_response_bytes=len(body))
-    beyond = await _analyze(_serving(body), max_response_bytes=len(body) - 1)
-
-    assert not within.failed
-    assert beyond.error == "response too large"
-
-
-async def test_refused_endpoint_is_not_contacted_and_no_secret_is_read() -> None:
-    server = _serving(b"{}")
-    lookups: list[str] = []
-
-    async def token() -> str | None:
-        lookups.append("lookup")
-        return TOKEN
-
-    response = await _analyze(server, token=token, endpoint_guard=RefusingGuard())
-
-    assert response.failed and response.error == "endpoint rejected: address is not allowed"
-    assert server.requests == []
-    assert lookups == []
-
-
 @pytest.mark.parametrize(
-    "token",
-    [None, _token(None), _token("")],
-    ids=["no-source", "returns-none", "returns-empty"],
+    ("endpoint", "options", "close_first", "error"),
+    [
+        pytest.param(
+            ENDPOINT,
+            # A refused address never costs a secret lookup.
+            {"endpoint_guard": RefusingGuard(), "token": _unread_token},
+            False,
+            "endpoint rejected: address is not allowed",
+            id="refused-endpoint",
+        ),
+        pytest.param(
+            ENDPOINT,
+            {"token": None, "token_required": True},
+            False,
+            "credential not found",
+            id="required-credential-without-a-source",
+        ),
+        pytest.param(
+            ENDPOINT,
+            {"token": _token(None), "token_required": True},
+            False,
+            "credential not found",
+            id="required-credential-that-is-none",
+        ),
+        pytest.param(
+            ENDPOINT,
+            {"token": _token(""), "token_required": True},
+            False,
+            "credential not found",
+            id="required-credential-that-is-empty",
+        ),
+        pytest.param(
+            ENDPOINT,
+            {"token": _token("line\nbreak")},
+            False,
+            "invalid credential",
+            id="token-with-a-line-break",
+        ),
+        pytest.param(
+            ENDPOINT,
+            {"token": _token("caf\N{LATIN SMALL LETTER E WITH ACUTE}")},
+            False,
+            "invalid credential",
+            id="token-that-is-not-ascii",
+        ),
+        pytest.param(
+            "https://detector.example:port/v1/analyze",
+            {},
+            False,
+            "invalid endpoint",
+            id="unparseable-endpoint",
+        ),
+        pytest.param(ENDPOINT, {"token": _unread_token}, True, "client closed", id="closed"),
+    ],
 )
-async def test_required_credential_that_is_missing_sends_nothing(
-    token: Callable[[], Awaitable[str | None]] | None,
+async def test_failures_that_send_nothing(
+    endpoint: str, options: dict[str, Any], close_first: bool, error: str
 ) -> None:
-    server = _serving(b"{}")
+    server = _serving()
+    client = HttpAnalyzeClient(endpoint, transport=httpx.MockTransport(server), **options)
+    if close_first:
+        await client.aclose()
+    try:
+        response = await client.analyze(REQUEST, 1.0)
+    finally:
+        # Closing a client that is closed already is harmless.
+        await client.aclose()
 
-    response = await _analyze(server, token=token, token_required=True)
-
-    assert response.failed and response.error == "credential not found"
+    assert response.failed and response.error == error
     assert server.requests == []
 
 
 async def test_optional_credential_that_is_missing_is_left_out() -> None:
-    server = _serving(b"{}")
+    server = _serving()
 
     response = await _analyze(server, token=_token(None))
 
@@ -228,25 +314,11 @@ async def test_optional_credential_that_is_missing_is_left_out() -> None:
 
 
 @pytest.mark.parametrize(
-    "value",
-    ["line\nbreak", "caf\N{LATIN SMALL LETTER E WITH ACUTE}"],
-    ids=["line-break", "non-ascii"],
-)
-async def test_token_that_cannot_be_a_header_is_refused(value: str) -> None:
-    server = _serving(b"{}")
-
-    response = await _analyze(server, token=_token(value))
-
-    assert response.failed and response.error == "invalid credential"
-    assert server.requests == []
-
-
-@pytest.mark.parametrize(
     ("deadline_s", "timeout_s"),
     [(2.0, 2.0), (0.001, 0.05), (0.0, 0.05)],
 )
 async def test_deadline_is_the_http_timeout(deadline_s: float, timeout_s: float) -> None:
-    server = _serving(b"{}")
+    server = _serving()
 
     await _analyze(server, deadline_s)
 
@@ -254,36 +326,56 @@ async def test_deadline_is_the_http_timeout(deadline_s: float, timeout_s: float)
     assert timeout == dict.fromkeys(("connect", "read", "write", "pool"), timeout_s)
 
 
-async def test_unparseable_endpoint_fails_without_a_request() -> None:
-    server = _serving(b"{}")
+async def test_clients_on_shared_connections() -> None:
+    server = _serving()
+    connections = HttpConnections(transport=httpx.MockTransport(server))
+    closed = HttpAnalyzeClient(ENDPOINT, connections=connections)
+    still_open = HttpAnalyzeClient(ENDPOINT, connections=connections)
 
-    response = await _analyze(server, endpoint="https://detector.example:port/v1/analyze")
+    # A client closed on its own leaves the connections to the clients that still use them.
+    await closed.aclose()
+    stopped = await closed.analyze(REQUEST, 1.0)
+    answered = await still_open.analyze(REQUEST, 1.0)
+    await connections.aclose()
+    after = await still_open.analyze(REQUEST, 1.0)
 
-    assert response.failed and response.error == "invalid endpoint"
-    assert server.requests == []
+    assert (stopped.failed, stopped.error) == (True, "client closed")
+    assert not answered.failed
+    assert (after.failed, after.error) == (True, "client closed")
+    assert len(server.requests) == 1
 
 
-async def test_closed_client_fails_instead_of_raising() -> None:
-    server = _serving(b"{}")
-    client = HttpAnalyzeClient(ENDPOINT, transport=httpx.MockTransport(server))
-    await client.aclose()
-    await client.aclose()
+async def test_connections_keep_one_client_per_origin() -> None:
+    connections = HttpConnections(transport=httpx.MockTransport(_serving()))
+    client = connections.client_for(ENDPOINT)
 
-    response = await client.analyze(REQUEST, 1.0)
-
-    assert response.failed and response.error == "client closed"
-    assert server.requests == []
+    # The default port names the same origin; another scheme or host is another origin.
+    assert connections.client_for("https://detector.example:443/v2/other") is client
+    assert connections.client_for("http://detector.example/v1/analyze") is not client
+    assert connections.client_for("https://other.example/v1/analyze") is not client
+    await connections.aclose()
+    assert connections.client_for(ENDPOINT) is None
 
 
 async def test_ca_bundle_path_does_not_trip_the_httpx_deprecation() -> None:
     with warnings.catch_warnings():
         warnings.filterwarnings("error", message=".*verify.*", category=DeprecationWarning)
-        client = HttpAnalyzeClient(ENDPOINT, verify=certifi.where())
-    await client.aclose()
+        connections = HttpConnections(verify=tls_verify(certifi.where()))
+        connections.client_for(ENDPOINT)
+    await connections.aclose()
 
 
-def test_constructing_without_the_extra_names_it(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "construct",
+    [
+        pytest.param(partial(HttpAnalyzeClient, ENDPOINT), id="client"),
+        pytest.param(HttpConnections, id="connections"),
+    ],
+)
+def test_constructing_without_the_extra_names_it(
+    monkeypatch: pytest.MonkeyPatch, construct: Callable[[], object]
+) -> None:
     monkeypatch.setattr(http_module, "_INSTALLED", False)
 
     with pytest.raises(RuntimeError, match=r"donkit-guard\[http\]"):
-        HttpAnalyzeClient(ENDPOINT)
+        construct()

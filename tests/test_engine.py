@@ -8,7 +8,7 @@ import pytest
 from donkit_guard import http as http_module
 from donkit_guard.actions import ActionDescriptor
 from donkit_guard.adapters import AnalyzeSpan
-from donkit_guard.audit import DecisionEvent, FindingsEvent
+from donkit_guard.audit import DecisionEvent, ExecutionEvent, FindingsEvent
 from donkit_guard.context import (
     Action,
     ActionKind,
@@ -27,7 +27,7 @@ from donkit_guard.detectors.pii_ner import PiiNerDetector
 from donkit_guard.detectors.runner import DetectorRunner, ExecutorKind
 from donkit_guard.detectors.secrets import SecretsDetector
 from donkit_guard.engine import Engine, EngineSettings
-from donkit_guard.errors import PolicyError
+from donkit_guard.errors import AuditWriteError, PolicyError
 from donkit_guard.findings import FindingClass, Findings, FindingSpan
 from donkit_guard.memory import (
     FailingDetectorClient,
@@ -51,9 +51,14 @@ from donkit_guard.policy import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from donkit_guard.audit import AuditEvent
+
 SECRET = "AKIA5RQTGNW2K4XQZJ7L"
 SECRET_TEXT = f"use key {SECRET} to deploy"
-SNILS_TEXT = "клиент СНИЛС 112-233-445 95"
+SNILS = "112-233-445 95"
+SNILS_TEXT = f"клиент СНИЛС {SNILS}"
+REFUND_NOTE = f"{SNILS_TEXT} просит возврат"
+CLEAN_NOTE = "customer asks for a refund"
 HARD_DENY_POLICY = (
     "version: s\nmode: enforce\nlayers:\n  - name: t\n    rules:\n      - id: pii-hard\n"
     "        match: {finding_class: [pii], destination_trust: [tenant]}\n"
@@ -174,6 +179,15 @@ class _DownRemote:
         return failed_findings(self, "service unavailable")
 
 
+class _DecisionRefusingSink(InMemoryAuditSink):
+    """A sink that writes every event but the decisions."""
+
+    async def record(self, event: AuditEvent) -> None:
+        if isinstance(event, DecisionEvent):
+            raise AuditWriteError("the decision table is unavailable")
+        await super().record(event)
+
+
 def _engine(
     mode: PolicyMode = PolicyMode.ENFORCE,
     *,
@@ -228,14 +242,16 @@ def _byok(ctx: GuardContext) -> GuardContext:
     )
 
 
-def _tool_call(ctx: GuardContext, tool: str, arguments: dict[str, Any]) -> GuardContext:
+def _tool_call(
+    ctx: GuardContext,
+    tool: str,
+    arguments: dict[str, Any],
+    effect: EffectClass = EffectClass.EGRESS,
+) -> GuardContext:
     return ctx.model_copy(
         update={
             "action": Action(
-                kind=ActionKind.TOOL_CALL,
-                tool=tool,
-                arguments=arguments,
-                effect=EffectClass.EGRESS,
+                kind=ActionKind.TOOL_CALL, tool=tool, arguments=arguments, effect=effect
             )
         }
     )
@@ -613,6 +629,17 @@ async def test_background_findings_are_recorded_under_the_decision_id(
     assert late.rule_ids == ("pii-audit",) and late.finding_classes == (FindingClass.PII,)
 
 
+async def test_findings_of_an_unwritten_decision_are_not_written(
+    llm_context: GuardContext,
+) -> None:
+    engine, audit = _engine(sink=_DecisionRefusingSink())
+    decision = await engine.evaluate(llm_context, _user(SNILS_TEXT))
+    await engine.drain()
+    # A decision that is not critical stands without its event; its late findings do not.
+    assert decision.outcome is Outcome.ALLOW and not decision.critical
+    assert audit.events == []
+
+
 @pytest.mark.parametrize(
     ("required", "outcome", "code", "unchecked"),
     [
@@ -635,18 +662,24 @@ async def test_required_false_remote_is_unchecked(
     assert decision.unchecked_detectors == unchecked and decision.critical
 
 
-async def test_observe_answers_immediately(llm_context: GuardContext) -> None:
+async def test_observe_answers_immediately_and_records_the_decision_first(
+    llm_context: GuardContext,
+) -> None:
     release = asyncio.Event()
     secrets = _Probe("secrets-probe", FindingClass.SECRET, "API_KEY", release)
     engine, audit = _engine(PolicyMode.OBSERVE, detectors=[secrets])
     answer = await engine.evaluate(llm_context, _user("deploy with the key"))
     assert answer.outcome is Outcome.ALLOW and answer.explanation.code == "observe_deferred"
+    # The host acts on the answer at once, so it reports the execution before the decision
+    # has been evaluated.
+    await engine.record_execution(answer.decision_id, "success", duration_ms=1.0)
     assert audit.events == []
     release.set()
     await engine.drain()
-    (event,) = audit.events
+    event, execution = audit.events
     assert isinstance(event, DecisionEvent) and event.decision.decision_id == answer.decision_id
     assert event.decision.would_block and event.decision.would_outcome is Outcome.MASK
+    assert isinstance(execution, ExecutionEvent) and execution.decision_id == answer.decision_id
 
 
 async def test_no_room_for_background_checks(
@@ -700,13 +733,55 @@ async def test_tool_argument_previews_are_redacted_and_reused_by_the_audit_event
     payload = Payload.from_json(
         ctx.action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
     )
-    decision = await engine.evaluate(ctx, payload)
+    # Every detector reports before this decision, so its previews show what holds no finding.
+    decision = await engine.evaluate(ctx, payload, defer=False)
     preview = decision.display_args_redacted["/body"]
     assert SECRET not in preview and "█" in preview
     assert decision.display_args_redacted["/note"] == "see key"
     event = audit.events[-1]
     assert isinstance(event, DecisionEvent)
     assert event.display_args_redacted == decision.display_args_redacted
+
+
+@pytest.mark.parametrize(
+    ("note", "ner_client", "late_previews", "late_unchecked"),
+    [
+        pytest.param(
+            REFUND_NOTE,
+            None,
+            {"/note": REFUND_NOTE.replace(SNILS, "█" * len(SNILS))},
+            (),
+            id="personal-data",
+        ),
+        pytest.param(CLEAN_NOTE, None, {"/note": CLEAN_NOTE}, (), id="clean"),
+        pytest.param(
+            CLEAN_NOTE, FailingDetectorClient("down"), None, ("pii-ner@1",), id="detector-failed"
+        ),
+    ],
+)
+async def test_previews_wait_for_the_background_detectors(
+    tool_context: GuardContext,
+    note: str,
+    ner_client: FailingDetectorClient | None,
+    late_previews: dict[str, str] | None,
+    late_unchecked: tuple[str, ...],
+) -> None:
+    # Under the default policy only an audit rule uses personal data in the arguments of a
+    # read, so the PII detectors scan in the background while the decision goes back.
+    engine, audit = _engine(ner_client=ner_client)
+    ctx = _tool_call(tool_context, "crm_lookup", {"note": note}, effect=EffectClass.READ)
+    payload = Payload.from_json(
+        ctx.action.arguments, source=SegmentSource.TOOL_ARGS, trust=SegmentTrust.TRUSTED
+    )
+    decision = await engine.evaluate(ctx, payload)
+    await engine.drain()
+    event, late = audit.events
+    withheld = {"/note": "█" * len(note)}
+    assert decision.outcome is Outcome.ALLOW and decision.display_args_redacted == withheld
+    assert isinstance(event, DecisionEvent) and event.display_args_redacted == withheld
+    assert isinstance(late, FindingsEvent) and late.decision_id == decision.decision_id
+    assert late.display_args_redacted == late_previews
+    assert late.unchecked_detectors == late_unchecked
 
 
 async def test_preview_entries_are_capped_by_the_engine_settings(

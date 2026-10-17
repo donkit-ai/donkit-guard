@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from donkit_guard.adapters import AnalyzeRequest, AnalyzeSegment, DetectorClient
+from donkit_guard.adapters import AnalyzeRequest, DetectorClient
 from donkit_guard.detectors.base import failed_findings
-from donkit_guard.detectors.remote_common import chunk_segment, request_deadline_ms
+from donkit_guard.detectors.remote_common import build_wire, request_deadline_ms
 from donkit_guard.findings import FindingClass, Findings, FindingSpan
 
 if TYPE_CHECKING:
@@ -40,20 +40,11 @@ class PiiNerDetector:
         )
 
     async def adetect(self, segments: Sequence[Segment], deadline_s: float) -> Findings:
-        wire: list[AnalyzeSegment] = []
-        origin: dict[str, tuple[Segment, int]] = {}
-        scanned = 0
-        for segment in segments:
-            if segment.text is None or segment.uninspected or segment.hashlike():
-                continue
-            scanned += 1
-            for chunk_id, offset, text in chunk_segment(segment, self._max_segment_bytes):
-                wire.append(AnalyzeSegment(id=chunk_id, text=text, lang=self._lang(segment)))
-                origin[chunk_id] = (segment, offset)
-        if not wire:
+        wire = build_wire(segments, self._max_segment_bytes, self._lang)
+        if not wire.segments:
             return Findings(detector=self.name, version=self.version, segments_scanned=0)
         request = AnalyzeRequest(
-            segments=tuple(wire),
+            segments=wire.segments,
             deadline_ms=request_deadline_ms(deadline_s),
         )
         response = await self._client.analyze(request, deadline_s)
@@ -67,10 +58,10 @@ class PiiNerDetector:
             )
         spans: list[FindingSpan] = []
         for hit in response.spans:
-            located = origin.get(hit.segment_id)
+            located = wire.origin.get(hit.segment_id)
             if located is None:
                 continue
-            segment, offset = located
+            segment, offset, _ = located
             spans.append(
                 FindingSpan(
                     segment_id=segment.id,
@@ -88,5 +79,5 @@ class PiiNerDetector:
             version=self.version,
             pattern_set_hash=self.pattern_set_hash,
             spans=tuple(spans),
-            segments_scanned=scanned,
+            segments_scanned=wire.scanned,
         )

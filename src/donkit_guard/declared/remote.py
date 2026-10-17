@@ -10,10 +10,10 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from donkit_guard.adapters import AnalyzeRequest, AnalyzeSegment, DetectorClient
+from donkit_guard.adapters import AnalyzeRequest, DetectorClient
 from donkit_guard.declared.spec import MAX_FINDINGS_PER_SEGMENT, RemoteDetectorSpec, spec_digest
 from donkit_guard.detectors.base import empty_findings, failed_findings
-from donkit_guard.detectors.remote_common import chunk_segment, request_deadline_ms
+from donkit_guard.detectors.remote_common import build_wire, request_deadline_ms
 from donkit_guard.findings import Findings, FindingSpan
 
 if TYPE_CHECKING:
@@ -58,21 +58,11 @@ class DeclaredRemoteDetector:
         self.required = spec.required
 
     async def adetect(self, segments: Sequence[Segment], deadline_s: float) -> Findings:
-        wire: list[AnalyzeSegment] = []
-        # Chunk id -> (segment, offset of the chunk in the segment, length of the chunk).
-        origin: dict[str, tuple[Segment, int, int]] = {}
-        scanned = 0
-        for segment in segments:
-            if segment.text is None or segment.uninspected or segment.hashlike():
-                continue
-            scanned += 1
-            for chunk_id, offset, text in chunk_segment(segment, self._max_segment_bytes):
-                wire.append(AnalyzeSegment(id=chunk_id, text=text, lang=segment.lang))
-                origin[chunk_id] = (segment, offset, len(text))
-        if not wire:
+        wire = build_wire(segments, self._max_segment_bytes, _segment_lang)
+        if not wire.segments:
             return empty_findings(self)
         request = AnalyzeRequest(
-            segments=tuple(wire),
+            segments=wire.segments,
             deadline_ms=request_deadline_ms(deadline_s),
         )
         response = await self._client.analyze(request, deadline_s)
@@ -83,7 +73,7 @@ class DeclaredRemoteDetector:
         reported: Counter[str] = Counter()
         for hit in response.spans:
             mapping = self._entities.get(hit.entity_type)
-            located = origin.get(hit.segment_id)
+            located = wire.origin.get(hit.segment_id)
             if mapping is None or located is None:
                 continue
             segment, offset, length = located
@@ -110,5 +100,11 @@ class DeclaredRemoteDetector:
             version=self.version,
             pattern_set_hash=self.pattern_set_hash,
             spans=tuple(spans),
-            segments_scanned=scanned,
+            segments_scanned=wire.scanned,
         )
+
+
+def _segment_lang(segment: Segment) -> str | None:
+    # The service is given the segment's language hint as it is; which codes it supports is
+    # for the service to decide.
+    return segment.lang

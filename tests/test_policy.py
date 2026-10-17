@@ -45,8 +45,8 @@ layers:
         action: require_approval
 """
 
-# Pattern and terms detectors need the "re2" extra. CI installs every extra; a bare install
-# reports the cases it cannot run as skipped.
+# Pattern detectors need the "re2" extra. CI installs every extra; a bare install reports the
+# cases it cannot run as skipped.
 needs_re2 = pytest.mark.skipif(not re2_available(), reason=RE2_MISSING)
 
 ENDPOINT = "https://detector.example.com/v1/analyze"
@@ -394,7 +394,7 @@ def test_bundle_lists_the_detectors_of_every_document() -> None:
         ),
         pytest.param(
             _document(_pattern(patterns=[r"(?<=CN-)\d{6}"])),
-            "detectors/0/patterns/0",
+            "detectors/0/patterns/0: invalid perl operator",
             id="lookbehind-pattern",
             marks=needs_re2,
         ),

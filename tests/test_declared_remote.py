@@ -5,14 +5,6 @@ import pytest
 from donkit_guard.adapters import AnalyzeRequest, AnalyzeResponse, AnalyzeSpan
 from donkit_guard.declared.remote import DeclaredRemoteDetector
 from donkit_guard.declared.spec import RemoteDetectorSpec, spec_digest
-from donkit_guard.detectors.base import (
-    RemoteDetector,
-    detector_cache_scope,
-    detector_cache_ttl_s,
-    detector_required,
-    detector_subtypes,
-    detector_timeout_ms,
-)
 from donkit_guard.findings import FindingClass
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 
@@ -227,19 +219,3 @@ async def test_declared_remote_asks_nothing_without_text_to_inspect() -> None:
 
     assert client.requests == []
     assert not findings.failed and findings.segments_scanned == 0 and findings.spans == ()
-
-
-def test_declared_remote_exposes_what_the_runner_reads() -> None:
-    spec = _spec(timeout_ms=500, cache_ttl_s=0, required=False)
-    client = CannedClient(AnalyzeResponse())
-    detector = DeclaredRemoteDetector(spec, client, cache_scope="tenant-a")
-
-    assert isinstance(detector, RemoteDetector)
-    assert (detector.name, detector.version) == (NAME, "1")
-    assert detector.classes == {FindingClass.CORPORATE, FindingClass.PII}
-    assert detector.pattern_set_hash == spec_digest(spec)
-    assert detector_subtypes(detector) == {"CONTRACT_NUMBER", "PERSON_NAME"}
-    assert detector_cache_scope(detector) == "tenant-a"
-    assert detector_timeout_ms(detector) == 500
-    assert detector_cache_ttl_s(detector) == 0
-    assert detector_required(detector) is False

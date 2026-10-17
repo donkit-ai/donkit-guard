@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib.util import find_spec
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -20,11 +21,14 @@ from donkit_guard.declared.validation import validate_specs
 from donkit_guard.detectors.base import detector_cache_scope, detector_key
 from donkit_guard.payload import Segment, SegmentSource, SegmentTrust
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 if find_spec("httpx") is not None:
     import httpx
 
-# Pattern and terms detectors need the "re2" extra, remote ones the "http" extra. CI installs
-# every extra; a bare install reports the cases it cannot run as skipped.
+# Pattern detectors with patterns need the "re2" extra, remote ones the "http" extra. CI
+# installs every extra; a bare install reports the cases it cannot run as skipped.
 needs_re2 = pytest.mark.skipif(not re2_available(), reason=RE2_MISSING)
 needs_http = pytest.mark.skipif(
     find_spec("httpx") is None, reason="the 'http' extra is not installed"
@@ -100,10 +104,10 @@ class TenantTokens:
 
     def __init__(self, tokens: dict[str | None, str]) -> None:
         self._tokens = tokens
-        self.lookups: list[tuple[str | None, str]] = []
+        self.lookups: list[tuple[str | None, str, str]] = []
 
-    async def token(self, tenant_id: str | None, name: str) -> str | None:
-        self.lookups.append((tenant_id, name))
+    async def token(self, tenant_id: str | None, name: str, endpoint: str) -> str | None:
+        self.lookups.append((tenant_id, name, endpoint))
         return self._tokens.get(tenant_id)
 
 
@@ -150,36 +154,48 @@ def test_detectors_for_caches_per_tenant_and_spec() -> None:
 
 
 @needs_http
-async def test_aclose_closes_cached_and_evicted_clients() -> None:
+async def test_remote_detectors_share_connections_until_aclose() -> None:
     service = Service()
-    declared = DeclaredDetectors(max_cached=1, http_transport=httpx.MockTransport(service))
-    (evicted,) = declared.detectors_for("tenant-a", [_remote()])
-    (cached,) = declared.detectors_for("tenant-b", [_remote()])
-    assert isinstance(evicted, DeclaredRemoteDetector)
-    assert isinstance(cached, DeclaredRemoteDetector)
+    closes: list[str] = []
+
+    class Transport(httpx.MockTransport):
+        async def aclose(self) -> None:
+            closes.append("closed")
+
+    declared = DeclaredDetectors(max_cached=2, http_transport=Transport(service))
+    tenants = [f"tenant-{n}" for n in range(5)]
+    detectors = [declared.detectors_for(tenant, [_remote()])[0] for tenant in tenants]
+    assert all(isinstance(detector, DeclaredRemoteDetector) for detector in detectors)
 
     # Dropped from the cache, a detector keeps working for an evaluation still holding it.
-    assert not (await evicted.adetect([MESSAGE], 1.0)).failed
+    assert not (await detectors[0].adetect([MESSAGE], 1.0)).failed
     await declared.aclose()
 
-    closed = [await detector.adetect([MESSAGE], 1.0) for detector in (evicted, cached)]
-    assert [(f.failed, f.error) for f in closed] == [(True, "client closed")] * 2
+    closed = [await detector.adetect([MESSAGE], 1.0) for detector in detectors]
+    assert [(f.failed, f.error) for f in closed] == [(True, "client closed")] * len(detectors)
     assert len(service.requests) == 1
+    # All the detectors called one endpoint through connections they shared, closed once.
+    assert closes == ["closed"]
     # Closing empties the cache: a detector asked for afterwards is built anew and works.
-    (rebuilt,) = declared.detectors_for("tenant-b", [_remote()])
-    assert isinstance(rebuilt, DeclaredRemoteDetector)
+    (rebuilt,) = declared.detectors_for(tenants[-1], [_remote()])
     assert not (await rebuilt.adetect([MESSAGE], 1.0)).failed
     await declared.aclose()
 
 
+def test_missing_ca_bundle_fails_when_the_factory_is_made(tmp_path: Path) -> None:
+    with pytest.raises(OSError):
+        DeclaredDetectors(ca_bundle=str(tmp_path / "missing-ca.pem"))
+
+
 @needs_http
 @pytest.mark.parametrize(
-    ("tenant_id", "credential", "lookups", "authorizations", "error"),
+    ("tenant_id", "credential", "resolves", "lookups", "authorizations", "error"),
     [
         pytest.param(
             "tenant-a",
             "bank-dlp",
-            [("tenant-a", "bank-dlp")],
+            True,
+            [("tenant-a", "bank-dlp", ENDPOINT)],
             ["Bearer token-a"],
             None,
             id="the-tenant-secret-is-sent",
@@ -187,7 +203,8 @@ async def test_aclose_closes_cached_and_evicted_clients() -> None:
         pytest.param(
             "tenant-b",
             "bank-dlp",
-            [("tenant-b", "bank-dlp")],
+            True,
+            [("tenant-b", "bank-dlp", ENDPOINT)],
             [],
             "credential not found",
             id="a-missing-secret-sends-nothing",
@@ -195,25 +212,40 @@ async def test_aclose_closes_cached_and_evicted_clients() -> None:
         pytest.param(
             "tenant-a",
             None,
+            True,
             [],
             [None],
             None,
             id="no-credential-is-looked-up-or-sent",
         ),
+        pytest.param(
+            "tenant-a",
+            "bank-dlp",
+            False,
+            [],
+            [],
+            "credential not found",
+            id="without-a-resolver-no-credential-resolves",
+        ),
     ],
 )
 async def test_remote_token_and_guard_wiring(
+    monkeypatch: pytest.MonkeyPatch,
     tenant_id: str,
     credential: str | None,
-    lookups: list[tuple[str, str]],
+    resolves: bool,
+    lookups: list[tuple[str, str, str]],
     authorizations: list[str | None],
     error: str | None,
 ) -> None:
+    # A secret the host keeps in the environment for a detector of its own: a declaration
+    # that names it reaches it only through a resolver the host chose.
+    monkeypatch.setenv("DONKIT_GUARD_CREDENTIAL_BANK_DLP", "host-secret")
     tokens = TenantTokens({"tenant-a": "token-a"})
     guard = RecordingGuard()
     service = Service()
     declared = DeclaredDetectors(
-        credential_resolver=tokens,
+        credential_resolver=tokens if resolves else None,
         endpoint_guard=guard,
         http_transport=httpx.MockTransport(service),
     )
@@ -291,8 +323,8 @@ def test_validate_specs_paths(specs: list[DetectorSpec], expected: list[str]) ->
         ),
         pytest.param(
             _terms(),
-            [f"detectors/0: {RE2_MISSING}"],
-            id="terms-need-re2",
+            [],
+            id="terms-need-no-re2",
         ),
         pytest.param(
             _pattern(json_keys=["contract_id"]),
@@ -313,7 +345,7 @@ def test_validate_specs_without_re2(
     ("spec", "segment"),
     [
         pytest.param(_pattern(json_keys=["contract_id"]), CONTRACT_ID, id="pattern"),
-        pytest.param(VALID_TERMS, CODE_NAME_MESSAGE, id="terms", marks=needs_re2),
+        pytest.param(VALID_TERMS, CODE_NAME_MESSAGE, id="terms"),
     ],
 )
 def test_build_local_from_payload_round_trip(spec: DetectorSpec, segment: Segment) -> None:

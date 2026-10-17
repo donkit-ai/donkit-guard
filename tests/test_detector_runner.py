@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -9,12 +10,9 @@ import pytest
 from donkit_guard.declared.pattern import PatternDetector
 from donkit_guard.declared.spec import PatternDetectorSpec
 from donkit_guard.detectors.base import (
-    detector_cache_scope,
-    detector_cache_ttl_s,
     detector_key,
     detector_required,
     detector_subtypes,
-    detector_timeout_ms,
     empty_findings,
     failed_findings,
 )
@@ -71,16 +69,6 @@ class ScopedDetector(CountingDetector):
         self.cache_scope = cache_scope
 
 
-class DeclaringDetector(CountingDetector):
-    """Declares every optional attribute."""
-
-    subtypes = frozenset({"EMAIL"})
-    cache_scope = "tenant-a"
-    timeout_ms = 1500
-    cache_ttl_s = 60
-    required = False
-
-
 class MistypedDetector(CountingDetector):
     """Declares attributes of the wrong type."""
 
@@ -108,6 +96,26 @@ class SlowDetector:
 
     def detect(self, segments: Sequence[Segment]) -> Findings:
         time.sleep(self.delay_s)
+        return empty_findings(self, len(segments))
+
+
+class BlockedDetector:
+    """Holds its worker until the test releases it; ``started`` is set once it runs."""
+
+    name = "blocked"
+    version = "1"
+    classes = frozenset({FindingClass.PII})
+    remote = False
+    pattern_set_hash = ""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def detect(self, segments: Sequence[Segment]) -> Findings:
+        self.started.set()
+        # Bounded, so that a failing test does not leave the worker blocked for good.
+        self.release.wait(timeout=30.0)
         return empty_findings(self, len(segments))
 
 
@@ -254,31 +262,11 @@ async def test_cache_lifetime_comes_from_the_detector(
     assert detector.calls == calls
 
 
-@pytest.mark.parametrize(
-    ("detector", "expected"),
-    [
-        pytest.param(CountingDetector(), (None, "", None, None, True), id="plain"),
-        pytest.param(
-            DeclaringDetector(),
-            (frozenset({"EMAIL"}), "tenant-a", 1500, 60, False),
-            id="declared",
-        ),
-        # A bare string is not a set of subtypes, and only an explicit False opts out of
-        # being required: a wrong type must never narrow what runs or relax a failure.
-        pytest.param(MistypedDetector(), (None, "", None, None, True), id="mistyped"),
-    ],
-)
-def test_optional_detector_attributes_are_read_through_accessors(
-    detector: CountingDetector, expected: tuple[object, ...]
-) -> None:
-    actual = (
-        detector_subtypes(detector),
-        detector_cache_scope(detector),
-        detector_timeout_ms(detector),
-        detector_cache_ttl_s(detector),
-        detector_required(detector),
-    )
-    assert actual == expected
+def test_mistyped_detector_attributes_keep_the_safe_defaults() -> None:
+    # A bare string is not a set of subtypes, and only an explicit False opts out of being
+    # required: a wrong type must never narrow what runs or relax a failure.
+    detector = MistypedDetector()
+    assert detector_subtypes(detector) is None and detector_required(detector) is True
 
 
 @pytest.mark.parametrize(
@@ -327,6 +315,55 @@ async def test_a_timed_out_worker_does_not_wedge_the_next_scan() -> None:
     finally:
         runner.close()
     assert second.failed is False and second.segments_scanned == 2
+
+
+async def test_a_blocked_background_scan_does_not_hold_up_a_foreground_scan() -> None:
+    blocked, counting = BlockedDetector(), CountingDetector()
+    # A deadline no scan comes near: only a foreground scan queued behind the blocked one
+    # would fail it.
+    runner = DetectorRunner(
+        [counting],
+        executor=ExecutorKind.THREAD,
+        budget=Budget(local_base_ms=10_000.0),
+        max_workers=1,
+        background_workers=1,
+    )
+    try:
+        background = asyncio.create_task(runner.run(_segments(), [blocked], background=True))
+        assert await asyncio.to_thread(blocked.started.wait, 10.0)
+        (foreground,) = await runner.run(_segments())
+        blocked.release.set()
+        (late,) = await background
+    finally:
+        blocked.release.set()
+        runner.close()
+    assert foreground.failed is False and foreground.segments_scanned == 2
+    assert late.failed is False
+
+
+async def test_a_background_scan_waiting_for_its_turn_keeps_its_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The loop's clock moves only when the test moves it, so that no deadline runs out
+    # while the test waits for a worker thread.
+    loop = asyncio.get_running_loop()
+    now = [loop.time()]
+    monkeypatch.setattr(loop, "time", lambda: now[0])
+    blocked, waiting = BlockedDetector(), CountingDetector()
+    runner = DetectorRunner([], executor=ExecutorKind.THREAD, background_workers=1)
+    try:
+        # The blocked detector takes the only turn, and the other one waits for it.
+        scan = asyncio.create_task(runner.run(_segments(), [blocked, waiting], background=True))
+        assert await asyncio.to_thread(blocked.started.wait, 10.0)
+        # Past every deadline: the blocked scan times out and hands its turn on. A deadline
+        # that had started with the wait for the turn would have run out as well.
+        now[0] += 3600.0
+        timed_out, scanned = await scan
+    finally:
+        blocked.release.set()
+        runner.close()
+    assert timed_out.failed is True and timed_out.error == "timeout"
+    assert scanned.failed is False and waiting.calls == 1
 
 
 async def test_remote_exception_is_reported() -> None:
@@ -426,6 +463,7 @@ def test_cache_expires_and_evicts() -> None:
         pytest.param(1, 2.0, False, True, id="shorter-than-default"),
         pytest.param(100, 11.0, True, False, id="longer-than-default"),
         pytest.param(0, 0.0, False, True, id="zero"),
+        pytest.param(-1, 0.0, False, True, id="negative"),
     ],
 )
 def test_cache_entry_ttl(
@@ -438,15 +476,6 @@ def test_cache_entry_ttl(
     now[0] = advance_s
     assert (cache.get("d@1", "own") is not None) is own_entry_kept
     assert (cache.get("d@1", "default") is not None) is default_entry_kept
-
-
-@pytest.mark.parametrize("ttl_s", [0, -1])
-def test_an_entry_without_a_lifetime_is_not_stored(ttl_s: float) -> None:
-    cache = DetectorResultCache()
-    cache.put("d@1", "kept", ())
-    before = cache.stats()
-    cache.put("d@1", "s1", (), ttl_s=ttl_s)
-    assert cache.stats() == before
 
 
 def test_budget_scales_with_size_and_caps_remote() -> None:

@@ -1,10 +1,10 @@
 """Builds the detectors that policy documents declare, once per tenant and declaration.
 
-Building a declared detector compiles RE2 expressions or, for a remote declaration, opens an
-HTTP client, so ``DeclaredDetectors`` keeps what it built: the same declaration for the same
-tenant gets the same detector back. A detector's ``cache_scope`` is its tenant, so the results
-the runner caches for it are never served to another tenant, and an edited declaration has
-another digest, so it never reads the results of its earlier version.
+Building a pattern or terms detector compiles its declaration, so ``DeclaredDetectors`` keeps
+what it built: the same declaration for the same tenant gets the same detector back. A
+detector's ``cache_scope`` is its tenant, so the results the runner caches for it are never
+served to another tenant, and an edited declaration has another digest, so it never reads the
+results of its earlier version. Remote detectors talk through HTTP connections they all share.
 
 A process-pool worker cannot be handed a detector built from a document. It is handed the
 detector's ``spec_payload()`` instead, and ``build_local_from_payload`` rebuilds a pattern or
@@ -16,13 +16,12 @@ from __future__ import annotations
 import json
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, TypeAdapter
 
-from donkit_guard.adapters import AllowAllEndpoints, EnvCredentialResolver
+from donkit_guard.adapters import AllowAllEndpoints
 from donkit_guard.context import FrozenModel
 from donkit_guard.declared.pattern import PatternDetector
 from donkit_guard.declared.remote import DeclaredRemoteDetector
@@ -33,7 +32,7 @@ from donkit_guard.declared.spec import (
     spec_digest,
 )
 from donkit_guard.declared.terms import TermsDetector
-from donkit_guard.http import HttpAnalyzeClient
+from donkit_guard.http import HttpAnalyzeClient, HttpConnections, tls_verify
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -48,33 +47,31 @@ if TYPE_CHECKING:
 _WORKER_CACHE_SIZE = 64
 
 
-@dataclass(frozen=True)
-class _Built:
-    """A detector built from a declaration, with the HTTP client it owns when it is remote."""
-
-    detector: AnyDetector
-    client: HttpAnalyzeClient | None = None
-
-
 class DeclaredDetectors:
     """The detectors of declared specs, built on demand and kept per tenant.
 
     At most ``max_cached`` detectors are kept, keyed by tenant and declaration digest; the
     least recently used one goes first. A ``remote`` declaration gets an ``HttpAnalyzeClient``
-    of its own, which:
+    on HTTP connections that every remote detector built here shares, made along with the
+    first of them. The client:
 
-    - asks ``credential_resolver`` (by default ``EnvCredentialResolver``) for the declared
-      credential before every request, and sends nothing when there is none;
+    - asks ``credential_resolver`` for the declared credential before every request, giving it
+      the tenant and the endpoint the token would be sent to. Credentials are opt-in: without
+      a resolver none resolves, so a declaration that names one fails its checks with
+      ``credential not found`` and sends nothing. ``EnvCredentialResolver`` reads them from
+      the environment, for a host that writes every policy document itself;
     - asks ``endpoint_guard`` (by default ``AllowAllEndpoints``) about the address before
       every request;
     - checks the service's certificate against ``ca_bundle``, a CA file or directory, when it
-      is given, and against the default CA bundle otherwise;
+      is given, and against the default CA bundle otherwise. The bundle is read here, so a
+      file that is missing or cannot be read raises ``OSError`` when the factory is made, not
+      when a policy is evaluated;
     - goes through ``http_transport`` when it is given, which tests use to stand in for the
       service.
 
-    The clients stay open until ``aclose``, those of detectors dropped from the cache too: an
-    evaluation that took such a detector may still be calling it. ``detectors_for`` may be
-    called from several threads.
+    The connections stay open until ``aclose``, so a detector dropped from the cache keeps
+    working for an evaluation that still holds it. ``detectors_for`` may be called from
+    several threads.
     """
 
     def __init__(
@@ -88,19 +85,18 @@ class DeclaredDetectors:
     ) -> None:
         if max_cached < 1:
             raise ValueError("max_cached must be at least 1")
-        self._credential_resolver: CredentialResolver = (
-            credential_resolver if credential_resolver is not None else EnvCredentialResolver()
-        )
+        self._credential_resolver = credential_resolver
         self._endpoint_guard: EndpointGuard = (
             endpoint_guard if endpoint_guard is not None else AllowAllEndpoints()
         )
-        self._verify: bool | str = ca_bundle or True
+        self._verify = tls_verify(ca_bundle)
         self._max_cached = max_cached
         self._http_transport = http_transport
         self._lock = threading.Lock()
-        self._built: OrderedDict[tuple[str, str], _Built] = OrderedDict()
-        # Clients of the remote detectors dropped from the cache, kept for `aclose`.
-        self._retired: list[HttpAnalyzeClient] = []
+        self._built: OrderedDict[tuple[str, str], AnyDetector] = OrderedDict()
+        # Made with the first remote detector, so that documents without remote declarations
+        # need no `http` extra.
+        self._connections: HttpConnections | None = None
 
     def detectors_for(
         self, tenant_id: str | None, specs: Sequence[DetectorSpec]
@@ -116,64 +112,65 @@ class DeclaredDetectors:
         return tuple(self._detector(scope, spec) for spec in specs)
 
     async def aclose(self) -> None:
-        """Close the HTTP client of every remote detector built so far.
+        """Close the HTTP connections of the remote detectors and forget every detector.
 
-        A detector handed out before fails its checks from then on, and the next
-        ``detectors_for`` builds new detectors.
+        A remote detector handed out before fails its checks from then on, and the next
+        ``detectors_for`` builds new detectors on new connections.
         """
         with self._lock:
-            clients = [built.client for built in self._built.values() if built.client is not None]
-            clients.extend(self._retired)
+            connections, self._connections = self._connections, None
             self._built.clear()
-            self._retired = []
-        for client in clients:
-            await client.aclose()
+        if connections is not None:
+            await connections.aclose()
 
     def _detector(self, scope: str, spec: DetectorSpec) -> AnyDetector:
         key = (scope, spec_digest(spec))
         with self._lock:
-            built = self._built.get(key)
-            if built is not None:
+            detector = self._built.get(key)
+            if detector is not None:
                 self._built.move_to_end(key)
-                return built.detector
-            built = self._build(scope, spec)
-            self._built[key] = built
+                return detector
+            detector = self._build(scope, spec)
+            self._built[key] = detector
             while len(self._built) > self._max_cached:
-                _, dropped = self._built.popitem(last=False)
-                if dropped.client is not None:
-                    self._retired.append(dropped.client)
-            return built.detector
+                self._built.popitem(last=False)
+            return detector
 
-    def _build(self, scope: str, spec: DetectorSpec) -> _Built:
+    def _build(self, scope: str, spec: DetectorSpec) -> AnyDetector:
+        """The detector ``spec`` declares for ``scope``; called with the lock held."""
         if not isinstance(spec, RemoteDetectorSpec):
-            return _Built(_build_local(spec, scope))
+            return _build_local(spec, scope)
+        if self._connections is None:
+            self._connections = HttpConnections(verify=self._verify, transport=self._http_transport)
         # An empty tenant id names no tenant, just as None does: the two share one scope.
         tenant_id = scope or None
         credential = spec.credential
-        token = None if credential is None else self._token_source(tenant_id, credential)
+        resolver = self._credential_resolver
+        token = None
+        if credential is not None and resolver is not None:
+            token = _token_source(resolver, tenant_id, credential, spec.endpoint)
         client = HttpAnalyzeClient(
             spec.endpoint,
             token=token,
             token_required=credential is not None,
             endpoint_guard=self._endpoint_guard,
-            verify=self._verify,
-            transport=self._http_transport,
+            connections=self._connections,
         )
-        return _Built(DeclaredRemoteDetector(spec, client, cache_scope=scope), client)
+        return DeclaredRemoteDetector(spec, client, cache_scope=scope)
 
-    def _token_source(
-        self, tenant_id: str | None, credential: str
-    ) -> Callable[[], Awaitable[str | None]]:
-        """A client's token callable: it looks the credential up anew for every request.
 
-        The detector stays cached for long, so a secret the host rotates must not stay in it.
-        """
-        resolver = self._credential_resolver
+def _token_source(
+    resolver: CredentialResolver, tenant_id: str | None, credential: str, endpoint: str
+) -> Callable[[], Awaitable[str | None]]:
+    """A client's token callable: it looks the credential up anew for every request.
 
-        async def token() -> str | None:
-            return await resolver.token(tenant_id, credential)
+    The detector stays cached for long, so a secret the host rotates must not stay in it.
+    """
 
-        return token
+    async def token() -> str | None:
+        return await resolver.token(tenant_id, credential, endpoint)
+
+    return token
 
 
 def _build_local(spec: PatternDetectorSpec | TermsDetectorSpec, scope: str) -> LocalDetector:

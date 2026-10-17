@@ -96,14 +96,15 @@ def test_word_pattern_rejects_a_missing_word(forms: list[str], reason: str) -> N
         # ...and after it.
         ("1234 contract", 0, 4, 13, True),
         ("1234 contract", 0, 4, 8, False),
+        # Without a window, a word that starts 40 characters before the span is near it.
+        ("contract" + "." * 32 + "1234", 40, 44, None, True),
     ],
 )
-def test_has_context_window(text: str, start: int, end: int, window: int, found: bool) -> None:
-    assert has_context(text, start, end, word_pattern(["contract"]), window) is found
-
-
-@pytest.mark.parametrize(("gap", "found"), [(32, True), (33, False)])
-def test_has_context_default_window_is_forty_characters(gap: int, found: bool) -> None:
-    text = "contract" + "." * gap + "1234"
-    start = len(text) - 4
-    assert has_context(text, start, len(text), word_pattern(["contract"])) is found
+def test_has_context_window(
+    text: str, start: int, end: int, window: int | None, found: bool
+) -> None:
+    pattern = word_pattern(["contract"])
+    if window is None:
+        assert has_context(text, start, end, pattern) is found
+    else:
+        assert has_context(text, start, end, pattern, window) is found

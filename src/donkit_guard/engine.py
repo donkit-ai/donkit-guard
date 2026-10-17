@@ -9,10 +9,14 @@ otherwise.
 
 A background check never denies the decision, and only a decision that asks for an approval
 waits for it, because the approval card shows the arguments. What it finds is written after the
-decision, as a ``FindingsEvent`` under the decision's id. In observe mode, which never blocks,
-the whole evaluation runs in the background and the host is answered at once. Background work
-is bounded by ``EngineSettings.max_background_checks``, and what is still running when the
-process ends is lost.
+decision, as a ``FindingsEvent`` under the decision's id. A decision shows no value of a tool
+call's arguments until every detector has reported on them; when the background check was all
+it lacked, the ``FindingsEvent`` carries the previews. In observe mode, which never blocks, the
+whole evaluation runs in the background and the host is answered at once; an execution event
+recorded meanwhile is written after the decision. Background scans take the runner's background
+lane, so they never hold up a scan an answer waits for. Background work is bounded by
+``EngineSettings.max_background_checks``, and what is still running when the process ends is
+lost.
 """
 
 from __future__ import annotations
@@ -79,7 +83,8 @@ class EngineSettings(FrozenModel):
     # Background checks in flight at once: audit-only detectors still scanning after their
     # decision went back, and observe-mode evaluations answered before they ran. With no
     # room left, an evaluation lists its audit-only detectors as unchecked, and observe mode
-    # answers only once its evaluation is done.
+    # answers only once its evaluation is done. An execution event that waits for its
+    # deferred decision takes room too, and is never refused.
     max_background_checks: int = 200
     # Seconds `Engine.aclose` gives the background checks to finish before cancelling them.
     background_drain_s: float = 5.0
@@ -108,17 +113,29 @@ class _Call:
     started: float
 
 
+@dataclass(frozen=True)
+class _Settlement:
+    """How an evaluation ended, as its background check needs to know it."""
+
+    # Whether the decision event was written: the findings follow it, or are not written.
+    written: bool
+    # Set when the decision withheld the argument previews of a tool call only because the
+    # check was still running: the synchronous spans the previews are rendered from, together
+    # with what the check finds.
+    preview_spans: tuple[FindingSpan, ...] | None
+
+
 class _BackgroundCheck:
     """The audit-only detectors of one evaluation, scanning while its decision goes back.
 
-    An engine task waits for ``scan`` and then for ``decided``, the evaluation's word on
-    whether it wrote its decision event, so that the findings are written after that event
-    or not at all.
+    An engine task waits for ``scan`` and then for ``decided``, the evaluation's word on how
+    its decision ended, so that the findings are written after the decision event or not at
+    all.
     """
 
     def __init__(self, scan: asyncio.Task[list[Findings]]) -> None:
         self.scan = scan
-        self.decided: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self.decided: asyncio.Future[_Settlement] = asyncio.get_running_loop().create_future()
 
     async def findings(self) -> list[Findings] | None:
         """What the detectors found, or ``None`` when the scan was cancelled or broke down."""
@@ -127,10 +144,10 @@ class _BackgroundCheck:
             return None
         return self.scan.result()
 
-    def settle(self, recorded: bool) -> None:
-        """Tell the waiting task whether the decision event was written."""
+    def settle(self, written: bool, preview_spans: tuple[FindingSpan, ...] | None) -> None:
+        """Tell the waiting task whether the decision event was written, and what it withheld."""
         if not self.decided.done():
-            self.decided.set_result(recorded)
+            self.decided.set_result(_Settlement(written=written, preview_spans=preview_spans))
 
 
 def _protected(ctx: GuardContext, effective: EffectClass) -> bool:
@@ -179,6 +196,8 @@ class Engine:
         self._settings = settings if settings is not None else EngineSettings()
         # Background checks in flight, held here so that none is collected before it ends.
         self._background: set[asyncio.Task[None]] = set()
+        # The deferred evaluations still running, by the decision id of their answer.
+        self._deferred: dict[str, asyncio.Task[None]] = {}
 
     async def drain(self) -> None:
         """Wait until every background check has finished, including those started meanwhile."""
@@ -227,15 +246,27 @@ class Engine:
         error_class: str | None = None,
         duration_ms: float = 0.0,
     ) -> None:
-        await self.audit_sink.record(
-            ExecutionEvent(
-                decision_id=decision_id,
-                outcome=outcome,
-                error_class=error_class,
-                duration_ms=duration_ms,
-                occurred_at=self._clock(),
-            )
+        """Write the execution event of a decision.
+
+        The decision event behind an ``observe_deferred`` answer is written by an evaluation
+        that may still be running. The execution event then waits for that evaluation to end,
+        as background work that ``drain`` and ``aclose`` cover, and a sink failure is only
+        logged. Otherwise it is written at once, and a sink failure reaches the caller.
+        """
+        event = ExecutionEvent(
+            decision_id=decision_id,
+            outcome=outcome,
+            error_class=error_class,
+            duration_ms=duration_ms,
+            occurred_at=self._clock(),
         )
+        evaluation = self._deferred.get(decision_id)
+        if evaluation is None or evaluation.done():
+            await self.audit_sink.record(event)
+            return
+        # A host may update the record of a decision from its execution, so the execution
+        # must not reach the sink before the decision does.
+        self._spawn(self._record_after(evaluation, event))
 
     async def record_decision(self, decision: Decision, ctx: GuardContext) -> Decision:
         """Write the decision event and answer with the decision the host may act on.
@@ -244,6 +275,11 @@ class Engine:
         decision into a deny: a decision nobody can reconstruct later must not
         keep its permission.
         """
+        answer, _ = await self._write_decision(decision, ctx)
+        return answer
+
+    async def _write_decision(self, decision: Decision, ctx: GuardContext) -> tuple[Decision, bool]:
+        """The answer of ``record_decision``, and whether the decision event was written."""
         event = DecisionEvent(
             decision=decision,
             context=summarize_context(ctx),
@@ -257,7 +293,7 @@ class Engine:
         ) as exc:  # the sink is the host's; a lost critical event must not become a silent allow
             logger.warning("audit sink failed for decision %s: %s", decision.decision_id, exc)
             if decision.mode is PolicyMode.ENFORCE and decision.critical:
-                return decision.model_copy(
+                denied = decision.model_copy(
                     update={
                         "outcome": Outcome.DENY,
                         "explanation": decision.explanation.model_copy(
@@ -270,7 +306,9 @@ class Engine:
                         "masked_locations": (),
                     }
                 )
-        return decision
+                return denied, False
+            return decision, False
+        return decision, True
 
     async def evaluate(
         self,
@@ -290,7 +328,9 @@ class Engine:
         With ``defer`` the engine leaves for later what the answer does not depend on. The
         detectors only audit rules can use scan in the background, and what they find is
         written after the decision; a decision that asks for an approval still waits for them,
-        because its approval card shows the arguments. In observe mode, which never blocks,
+        because its approval card shows the arguments. Any other decision on a tool call shows
+        none of the argument values while they scan, and the ``FindingsEvent`` carries the
+        previews once every detector has reported. In observe mode, which never blocks,
         the whole evaluation runs in the background: the answer is an ``observe_deferred``
         allow, and the decision written later carries its ``decision_id``. Late findings
         follow a decision event, so without ``audit``, as with ``defer`` false, every selected
@@ -350,7 +390,10 @@ class Engine:
         if bundle.mode is PolicyMode.OBSERVE and defer and audit:
             if self._has_capacity():
                 decision_id = uuid.uuid4().hex
-                self._spawn(self._evaluate_deferred(call, decision_id))
+                evaluation = self._spawn(self._evaluate_deferred(call, decision_id))
+                # Held while it runs, so that an execution event of the decision can wait for it.
+                self._deferred[decision_id] = evaluation
+                evaluation.add_done_callback(lambda _: self._deferred.pop(decision_id, None))
                 return Decision(
                     decision_id=decision_id,
                     outcome=Outcome.ALLOW,
@@ -368,13 +411,24 @@ class Engine:
         return await self._evaluate(call, audit=audit, defer=defer)
 
     async def _evaluate(
-        self, call: _Call, *, audit: bool, defer: bool, decision_id: str | None = None
+        self,
+        call: _Call,
+        *,
+        audit: bool,
+        defer: bool,
+        decision_id: str | None = None,
+        in_background: bool = False,
     ) -> Decision:
         """The decision algorithm, on the policy and detectors ``call`` resolved.
 
         ``decision_id`` is that of the ``observe_deferred`` answer this decision stands behind.
-        A detector only audit rules can use never fails the decision: when it breaks down it
-        is listed as unchecked, as an optional detector is.
+        ``in_background`` is for an evaluation that no answer waits for: its scans take the
+        runner's background lane. A detector only audit rules can use never fails the
+        decision: when it breaks down it is listed as unchecked, as an optional detector is.
+
+        The argument previews of a tool call show the values only once every selected
+        detector has reported on the scanned segments. While a background check is still
+        running, and when a detector failed or did not run, every value is blacked out whole.
         """
         ctx, payload, bundle = call.ctx, call.payload, call.bundle
         decision_id = decision_id or uuid.uuid4().hex
@@ -418,122 +472,130 @@ class Engine:
         # the decision, even when the decision waits for it.
         audit_only = {id(detector) for detector in selection.background}
 
-        failed: list[str] = []
-        unchecked: list[str] = []
-        spans: list[FindingSpan] = []
-        if sync and to_scan:
-            found = await self.runner.run(to_scan, detectors=sync)
-            for detector, findings in zip(sync, found, strict=True):
-                if not findings.failed:
-                    spans.extend(findings.spans)
-                elif detector_required(detector) and id(detector) not in audit_only:
-                    failed.append(findings.detector_id)
-                else:
-                    unchecked.append(findings.detector_id)
-        verdicts.extend(_span_verdicts(finding_rules, spans, by_id))
-
-        enforceable = [v for v in verdicts if v.action is not RuleAction.AUDIT]
-        if enforceable:
-            lead = max(enforceable, key=lambda v: STRICTNESS[_OUTCOME_FOR_ACTION[v.action]])
-            outcome = _OUTCOME_FOR_ACTION[lead.action]
-            code, reason = _CODE_FOR_OUTCOME[outcome], lead.reason
-        elif _protected(ctx, effective):
-            outcome, code, reason = (
-                Outcome.DENY,
-                "default_deny",
-                "protected action without a matching rule",
-            )
-        else:
-            outcome, code, reason = Outcome.ALLOW, "allowed", ""
-
-        mask_verdicts = [v for v in verdicts if v.action is RuleAction.MASK]
-        mask_spans = [v.span for v in mask_verdicts if v.span is not None]
-        masked: dict[str, str] = {}
-        masked_locations: tuple[Location, ...] = ()
-        # A mask verdict without a span selects no text, so nothing would be
-        # rewritten while the outcome still claims the payload was masked.
-        unmaskable = any(v.span is None for v in mask_verdicts)
-        unmaskable_reason = "a mask rule matched without a finding to mask"
-        if mask_spans:
-            result = mask(
-                payload,
-                mask_spans,
-                maskable_arg_paths=descriptor.maskable_args if descriptor else (),
-            )
-            masked = result.masked
-            masked_locations = result.masked_locations
-            if not result.ok:
-                unmaskable = True
-                unmaskable_reason = "a finding inside tool arguments cannot be masked safely"
-        if unmaskable and STRICTNESS[outcome] < STRICTNESS[Outcome.DENY]:
-            outcome, code, reason = Outcome.DENY, "masking_impossible", unmaskable_reason
-        if failed and STRICTNESS[outcome] < STRICTNESS[Outcome.DENY]:
-            if bundle.mode is PolicyMode.ENFORCE:
-                outcome, code, reason = (
-                    Outcome.DENY,
-                    "detector_unavailable",
-                    f"detector(s) failed: {', '.join(failed)}",
-                )
-            else:
-                code = "detector_failed"
-        if (
-            uninspected
-            and bundle.unsupported_content == "deny"
-            and STRICTNESS[outcome] < STRICTNESS[Outcome.DENY]
-        ):
-            outcome, code, reason = (
-                Outcome.DENY,
-                "unsupported_content",
-                "the payload contains parts the guard cannot inspect",
-            )
-
-        would_outcome: Outcome | None = None
-        would_block = False
-        if bundle.mode is PolicyMode.OBSERVE and (outcome is not Outcome.ALLOW or masked):
-            would_outcome = outcome if outcome is not Outcome.ALLOW else Outcome.MASK
-            would_block = True
-            outcome = Outcome.ALLOW
-            masked = {}
-            masked_locations = ()
-        if outcome is Outcome.DENY:
-            # A payload the host may not send at all carries no usable masks.
-            masked = {}
-            masked_locations = ()
-        hard = outcome is Outcome.DENY and any(
-            v.action is RuleAction.DENY and v.hard for v in enforceable
-        )
-
         check: _BackgroundCheck | None = None
+        skipped: list[str] = []
         if background and to_scan:
             if self._has_capacity():
+                # Started before the synchronous scan, so that a decision which waits for it
+                # waits for the longer of the two scans and not for both in turn.
                 check = self._start_check(
                     to_scan,
                     background,
                     decision_id=decision_id,
                     ctx=ctx,
+                    payload=payload,
                     audit_rules=[r for r in finding_rules if r.action is RuleAction.AUDIT],
                     by_id=by_id,
                 )
             else:
-                unchecked.extend(detector_id(detector) for detector in background)
-        recorded = False
+                skipped = [detector_id(detector) for detector in background]
+        written = False
+        late_preview_spans: tuple[FindingSpan, ...] | None = None
+        # A started check is told how the evaluation ended, however it ended: its task waits
+        # for that word.
         try:
+            failed: list[str] = []
+            unchecked: list[str] = []
+            spans: list[FindingSpan] = []
+            if sync and to_scan:
+                found = await self.runner.run(to_scan, detectors=sync, background=in_background)
+                for detector, findings in zip(sync, found, strict=True):
+                    if not findings.failed:
+                        spans.extend(findings.spans)
+                    elif detector_required(detector) and id(detector) not in audit_only:
+                        failed.append(findings.detector_id)
+                    else:
+                        unchecked.append(findings.detector_id)
+            unchecked.extend(skipped)
+            verdicts.extend(_span_verdicts(finding_rules, spans, by_id))
+
+            enforceable = [v for v in verdicts if v.action is not RuleAction.AUDIT]
+            if enforceable:
+                lead = max(enforceable, key=lambda v: STRICTNESS[_OUTCOME_FOR_ACTION[v.action]])
+                outcome = _OUTCOME_FOR_ACTION[lead.action]
+                code, reason = _CODE_FOR_OUTCOME[outcome], lead.reason
+            elif _protected(ctx, effective):
+                outcome, code, reason = (
+                    Outcome.DENY,
+                    "default_deny",
+                    "protected action without a matching rule",
+                )
+            else:
+                outcome, code, reason = Outcome.ALLOW, "allowed", ""
+
+            mask_verdicts = [v for v in verdicts if v.action is RuleAction.MASK]
+            mask_spans = [v.span for v in mask_verdicts if v.span is not None]
+            masked: dict[str, str] = {}
+            masked_locations: tuple[Location, ...] = ()
+            # A mask verdict without a span selects no text, so nothing would be
+            # rewritten while the outcome still claims the payload was masked.
+            unmaskable = any(v.span is None for v in mask_verdicts)
+            unmaskable_reason = "a mask rule matched without a finding to mask"
+            if mask_spans:
+                result = mask(
+                    payload,
+                    mask_spans,
+                    maskable_arg_paths=descriptor.maskable_args if descriptor else (),
+                )
+                masked = result.masked
+                masked_locations = result.masked_locations
+                if not result.ok:
+                    unmaskable = True
+                    unmaskable_reason = "a finding inside tool arguments cannot be masked safely"
+            if unmaskable and STRICTNESS[outcome] < STRICTNESS[Outcome.DENY]:
+                outcome, code, reason = Outcome.DENY, "masking_impossible", unmaskable_reason
+            if failed and STRICTNESS[outcome] < STRICTNESS[Outcome.DENY]:
+                if bundle.mode is PolicyMode.ENFORCE:
+                    outcome, code, reason = (
+                        Outcome.DENY,
+                        "detector_unavailable",
+                        f"detector(s) failed: {', '.join(failed)}",
+                    )
+                else:
+                    code = "detector_failed"
+            if (
+                uninspected
+                and bundle.unsupported_content == "deny"
+                and STRICTNESS[outcome] < STRICTNESS[Outcome.DENY]
+            ):
+                outcome, code, reason = (
+                    Outcome.DENY,
+                    "unsupported_content",
+                    "the payload contains parts the guard cannot inspect",
+                )
+
+            would_outcome: Outcome | None = None
+            would_block = False
+            if bundle.mode is PolicyMode.OBSERVE and (outcome is not Outcome.ALLOW or masked):
+                would_outcome = outcome if outcome is not Outcome.ALLOW else Outcome.MASK
+                would_block = True
+                outcome = Outcome.ALLOW
+                masked = {}
+                masked_locations = ()
+            if outcome is Outcome.DENY:
+                # A payload the host may not send at all carries no usable masks.
+                masked = {}
+                masked_locations = ()
+            hard = outcome is Outcome.DENY and any(
+                v.action is RuleAction.DENY and v.hard for v in enforceable
+            )
+
             preview_spans = list(spans)
+            # Whether the background check has yet to report on the scanned segments.
+            check_running = check is not None
             if (
                 check is not None
                 and outcome is Outcome.REQUIRE_APPROVAL
                 and action.kind is ActionKind.TOOL_CALL
             ):
                 # An approver reads the argument previews, so they wait for every detector.
+                check_running = False
                 late = await check.findings()
                 if late is None:
                     unchecked.extend(detector_id(detector) for detector in background)
                 else:
                     unchecked.extend(f.detector_id for f in late if f.failed)
                     preview_spans.extend(span for f in late if not f.failed for span in f.spans)
-            # A detector that did not report may have found something in any value, so an
-            # approval card shows none of them.
-            redact_all = outcome is Outcome.REQUIRE_APPROVAL and bool(unchecked)
             critical = (
                 would_block
                 or outcome is not Outcome.ALLOW
@@ -541,18 +603,22 @@ class Engine:
                 or bool(failed)
                 or bool(unchecked)
             )
-            display_args = (
-                redact_display_args(
+            display_args: dict[str, str] = {}
+            if action.kind is ActionKind.TOOL_CALL:
+                # A detector that has not reported may have found something in any value, so
+                # no value is shown until every one has.
+                display_args = redact_display_args(
                     action.arguments,
                     preview_spans,
                     payload,
                     limit=self._settings.preview_chars,
                     max_entries=self._settings.max_preview_entries,
-                    redact_all=redact_all,
+                    redact_all=check_running or bool(unchecked) or bool(failed),
                 )
-                if action.kind is ActionKind.TOOL_CALL
-                else {}
-            )
+                if check_running and not (unchecked or failed) and action.arguments:
+                    # The running check is all that holds the previews back, so its findings
+                    # event carries them once it has reported.
+                    late_preview_spans = tuple(spans)
             decision = Decision(
                 decision_id=decision_id,
                 outcome=outcome,
@@ -582,12 +648,11 @@ class Engine:
             )
             if not audit:
                 return decision
-            answer = await self.record_decision(decision, ctx)
-            recorded = True
+            answer, written = await self._write_decision(decision, ctx)
             return answer
         finally:
             if check is not None:
-                check.settle(recorded)
+                check.settle(written, late_preview_spans)
 
     async def _policy_error(
         self,
@@ -631,14 +696,20 @@ class Engine:
         *,
         decision_id: str,
         ctx: GuardContext,
+        payload: Payload,
         audit_rules: Sequence[Rule],
         by_id: Mapping[str, Segment],
     ) -> _BackgroundCheck:
         """Scan ``segments`` with ``detectors`` in the background and record what they find."""
-        scan = asyncio.create_task(self.runner.run(segments, detectors=detectors))
+        scan = asyncio.create_task(self.runner.run(segments, detectors=detectors, background=True))
         check = _BackgroundCheck(scan)
         recording = self._record_late_findings(
-            check, decision_id=decision_id, ctx=ctx, audit_rules=audit_rules, by_id=by_id
+            check,
+            decision_id=decision_id,
+            ctx=ctx,
+            payload=payload,
+            audit_rules=audit_rules,
+            by_id=by_id,
         )
         recorder = self._spawn(recording)
         # A recorder cancelled before it ran never awaited its scan, which must not outlive it.
@@ -651,19 +722,35 @@ class Engine:
         *,
         decision_id: str,
         ctx: GuardContext,
+        payload: Payload,
         audit_rules: Sequence[Rule],
         by_id: Mapping[str, Segment],
     ) -> None:
         """Write what audit-only detectors found as a ``FindingsEvent`` after its decision.
 
-        Nothing is written when they found nothing and none failed, nor when the evaluation
-        ended without writing its decision. Nothing raised here reaches the host.
+        A decision that withheld the argument previews of a tool call only because this check
+        was running gets them here, rendered from the arguments and payload it decided on,
+        once every background detector reported. Nothing is written when there is nothing to
+        add (no finding, no failure, no previews), nor when the evaluation ended without
+        writing its decision. Nothing raised here reaches the host.
         """
         try:
             results = await check.scan
             failed = [f.detector_id for f in results if f.failed]
             spans = [span for f in results if not f.failed for span in f.spans]
-            if not (spans or failed) or not await check.decided:
+            settled = await check.decided
+            if not settled.written:
+                return
+            previews: dict[str, str] | None = None
+            if settled.preview_spans is not None and not failed:
+                previews = redact_display_args(
+                    ctx.action.arguments,
+                    [*settled.preview_spans, *spans],
+                    payload,
+                    limit=self._settings.preview_chars,
+                    max_entries=self._settings.max_preview_entries,
+                )
+            if not (spans or failed or previews):
                 return
             matched = _span_verdicts(audit_rules, spans, by_id)
             event = FindingsEvent(
@@ -673,6 +760,7 @@ class Engine:
                 finding_classes=tuple(sorted({s.cls for s in spans})),
                 rule_ids=tuple(dict.fromkeys(v.rule_id for v in matched)),
                 unchecked_detectors=tuple(dict.fromkeys(failed)),
+                display_args_redacted=previews,
                 occurred_at=self._clock(),
             )
             try:
@@ -684,11 +772,23 @@ class Engine:
         except Exception:  # the boundary of a background task: log, never raise to the host
             logger.exception("background check of decision %s failed", decision_id)
 
+    async def _record_after(self, evaluation: asyncio.Task[None], event: ExecutionEvent) -> None:
+        """Write ``event`` once ``evaluation``, which writes the decision event, has ended."""
+        await asyncio.wait((evaluation,))
+        try:
+            await self.audit_sink.record(event)
+        except Exception as exc:  # the caller has moved on, so a sink failure is only logged
+            logger.warning(
+                "audit sink failed for the execution of decision %s: %s", event.decision_id, exc
+            )
+
     async def _evaluate_deferred(self, call: _Call, decision_id: str) -> None:
         """Evaluate and record the decision behind an ``observe_deferred`` answer."""
         try:
             # Its latency is that of the evaluation, not of its wait for a turn to run.
             timed = replace(call, started=time.perf_counter())
-            await self._evaluate(timed, audit=True, defer=False, decision_id=decision_id)
+            await self._evaluate(
+                timed, audit=True, defer=False, decision_id=decision_id, in_background=True
+            )
         except Exception:  # the boundary of a background task: log, never raise to the host
             logger.exception("deferred evaluation of decision %s failed", decision_id)

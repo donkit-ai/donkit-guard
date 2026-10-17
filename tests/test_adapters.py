@@ -37,17 +37,6 @@ def test_analyze_models_match_the_service_contract() -> None:
         AnalyzeRequest(deadline_ms=0)
 
 
-def test_analyze_segment_language_is_a_free_form_hint() -> None:
-    request = AnalyzeRequest(
-        segments=(
-            AnalyzeSegment(id="s1", text="Hallo", lang="de"),
-            AnalyzeSegment(id="s2", text="Hi", lang=None),
-        )
-    )
-    wire = request.model_dump(mode="json")
-    assert [segment["lang"] for segment in wire["segments"]] == ["de", None]
-
-
 def test_analyze_response_ignores_unknown_fields() -> None:
     response = AnalyzeResponse.model_validate(
         {
@@ -82,10 +71,11 @@ async def test_env_credential_resolver_name_mapping(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("DONKIT_GUARD_CREDENTIAL_BANK_DLP", "token-value")
     monkeypatch.delenv("DONKIT_GUARD_CREDENTIAL_UNSET_NAME", raising=False)
     resolver = EnvCredentialResolver()
+    endpoint = "https://detector.example/v1/analyze"
 
-    assert await resolver.token("tenant-1", "bank-dlp") == "token-value"
-    assert await resolver.token(None, "bank-dlp") == "token-value"
-    assert await resolver.token("tenant-1", "unset-name") is None
+    assert await resolver.token("tenant-1", "bank-dlp", endpoint) == "token-value"
+    assert await resolver.token(None, "bank-dlp", endpoint) == "token-value"
+    assert await resolver.token("tenant-1", "unset-name", endpoint) is None
 
 
 def test_utc_now_is_timezone_aware() -> None:

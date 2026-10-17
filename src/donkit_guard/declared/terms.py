@@ -5,13 +5,18 @@ found only as whole words, in any case and whichever look-alike Latin or Cyrilli
 it; its words may stand apart by any run of whitespace, and a trailing ``*`` lets its last word
 take any ending. Terms and text are folded alike by ``donkit_guard.text.normalize``, and
 findings point into the original text.
+
+Terms are matched in plain Python, without RE2 and without any extra. They are indexed by their
+first characters, and a text is looked up only where a term could start, so a scan takes time
+linear in the length of the text times the number of distinct lengths among the terms that
+share a prefix.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import re
+from typing import TYPE_CHECKING
 
-from donkit_guard.declared.regex import compile_re2, escape_re2
 from donkit_guard.declared.spec import MAX_FINDINGS_PER_SEGMENT, TermsDetectorSpec, spec_digest
 from donkit_guard.findings import Findings, FindingSpan
 from donkit_guard.text import normalize
@@ -21,46 +26,62 @@ if TYPE_CHECKING:
 
     from donkit_guard.payload import Segment
 
-# Letters and digits make up words, and a term is found only where neither adjoins it. RE2's
-# ``\b`` knows ASCII letters only, so an expression spells out the characters around a term.
-_WORD = r"[\p{L}\p{N}]"
-_NOT_WORD = r"[^\p{L}\p{N}]"
-# Whitespace as ``str.split`` sees it, which RE2's ASCII-only ``\s`` is not.
-_GAP = r"[\x{09}-\x{0d}\x{1c}-\x{20}\x{85}\p{Z}]+"
+# Terms are indexed by their first eight characters, or by the whole of a shorter term: few
+# terms of a list share a prefix that long, and few words of a text start with one.
+_PREFIX = 8
+# ``\s`` is the whitespace ``str.split`` cuts terms at: made one space, a run of it in the text
+# matches the single space that joins the words of a term.
+_SPACE_RUN = re.compile(r"\s+")
+# Where an occurrence can start: a visible character with no letter or digit right before it.
+# ``[^\W_]`` is exactly what ``str.isalnum`` accepts.
+_WORD_START = re.compile(r"(?<![^\W_])\S")
 
 
-def _longest_first(alternatives: dict[str, str]) -> list[str]:
-    return [alternatives[key] for key in sorted(alternatives, key=len, reverse=True)]
+def _index(terms: Sequence[str]) -> dict[str, tuple[tuple[int, dict[str, bool]], ...]]:
+    """The forms of ``terms`` by prefix, then by length, longest first.
 
-
-def _alternatives(terms: Sequence[str]) -> tuple[list[str], list[str]]:
-    """RE2 alternatives of the plain terms and of the ``*`` terms, each list longest first.
-
-    RE2 takes the first alternative that matches at a place, so a term has to come before the
-    shorter terms it extends for it to be reported whole.
+    A form is the words of a term, folded and joined by single spaces; it maps to whether the
+    term ended in ``*``.
     """
-    plain: dict[str, str] = {}
-    starred: dict[str, str] = {}
+    by_prefix: dict[str, dict[int, dict[str, bool]]] = {}
     for term in terms:
         stem = term.strip()
+        starred = stem.endswith("*")
         words = normalize(stem.removesuffix("*")).text.split()
         if not words:
             raise ValueError(f"term {term!r} has no visible characters")
-        target = starred if stem.endswith("*") else plain
-        target[" ".join(words)] = "(?:" + _GAP.join(escape_re2(word) for word in words) + ")"
-    return _longest_first(plain), _longest_first(starred)
+        form = " ".join(words)
+        forms = by_prefix.setdefault(form[:_PREFIX], {}).setdefault(len(form), {})
+        # A term without the ``*`` finds part of what the same term with it finds.
+        forms[form] = forms.get(form, False) or starred
+    return {
+        prefix: tuple((length, by_length[length]) for length in sorted(by_length, reverse=True))
+        for prefix, by_length in by_prefix.items()
+    }
 
 
-def _expression(alternatives: Sequence[str], ending: str) -> Any:
-    """Compile one expression whose group 1 is an occurrence of one of ``alternatives``.
+def _collapse(text: str) -> tuple[str, list[int]]:
+    """``text`` with each run of whitespace made one space, and where its characters come from.
 
-    The match also takes the character on either side of the occurrence (none at an end of the
-    text): that is how a word boundary is written without lookaround. The character after one
-    occurrence may be the one before the next, so a search for the next occurrence starts
-    where the last occurrence ends, not where its match does.
+    The list holds, for every character of the collapsed text, its index in ``text``; a space
+    that stands for a run has the index of the run's first character.
     """
-    body = "|".join(alternatives)
-    return compile_re2(f"(?:^|{_NOT_WORD})((?:{body}){ending})(?:{_NOT_WORD}|$)")
+    pieces: list[str] = []
+    places: list[int] = []
+    position = 0
+    for run in _SPACE_RUN.finditer(text):
+        pieces.append(text[position : run.start()])
+        pieces.append(" ")
+        places.extend(range(position, run.start() + 1))
+        position = run.end()
+    pieces.append(text[position:])
+    places.extend(range(position, len(text)))
+    return "".join(pieces), places
+
+
+def _in_word(text: str, index: int) -> bool:
+    """Whether a letter or digit stands at ``index`` of ``text``."""
+    return index < len(text) and text[index].isalnum()
 
 
 class TermsDetector:
@@ -68,8 +89,7 @@ class TermsDetector:
 
     Occurrences never overlap: the leftmost is reported first and, of the terms that match at
     one place, the longest. A segment yields at most ``MAX_FINDINGS_PER_SEGMENT`` findings.
-    Building it raises ``ValueError`` for a term with no visible characters or a list RE2
-    cannot compile, and ``RuntimeError`` when the ``re2`` extra is not installed.
+    Building it raises ``ValueError`` for a term with no visible characters.
     """
 
     version = "1"
@@ -84,12 +104,11 @@ class TermsDetector:
         # ``donkit_guard.detectors.base``.
         self.subtypes = frozenset({spec.subtype})
         self.cache_scope = cache_scope
-        plain, starred = _alternatives(spec.terms)
-        self._expressions: tuple[Any, ...] = tuple(
-            _expression(alternatives, ending)
-            for alternatives, ending in ((plain, ""), (starred, f"{_WORD}*"))
-            if alternatives
-        )
+        self._index = _index(spec.terms)
+        # A term shorter than the prefix is indexed whole, so prefixes come in several lengths.
+        # Taking the longest first takes the longest forms first: a term indexed whole is shorter
+        # than every form under a longer prefix.
+        self._prefix_lengths = tuple(sorted({len(prefix) for prefix in self._index}, reverse=True))
 
     def detect(self, segments: Sequence[Segment]) -> Findings:
         spans: list[FindingSpan] = []
@@ -129,29 +148,42 @@ class TermsDetector:
         }
 
     def _occurrences(self, text: str) -> list[tuple[int, int]]:
-        """Spans of the occurrences in folded ``text``, in order.
-
-        Plain terms and ``*`` terms are separate expressions, so that the ``*`` ending is
-        written once for all of them. Of the next matches of the two, the one that starts
-        first is taken, and of two that start together the longer.
-        """
+        """Spans of the occurrences in folded ``text``, in order."""
+        collapsed, places = _collapse(text)
         found: list[tuple[int, int]] = []
-        position = 0
-        # The leftmost match of each expression at or after ``position``; None once it has none.
-        ahead: list[Any] = [expression.search(text) for expression in self._expressions]
-        while len(found) < MAX_FINDINGS_PER_SEGMENT:
-            best: tuple[int, int] | None = None
-            for index, expression in enumerate(self._expressions):
-                match = ahead[index]
-                if match is not None and match.start() < position:
-                    match = ahead[index] = expression.search(text, position)
-                if match is None:
-                    continue
-                start, end = match.span(1)
-                if best is None or start < best[0] or (start == best[0] and end > best[1]):
-                    best = (start, end)
-            if best is None:
+        last_end = 0
+        for match in _WORD_START.finditer(collapsed):
+            start = match.start()
+            if start < last_end:
+                continue
+            end = self._occurrence_end(collapsed, start)
+            if end is None:
+                continue
+            # The last character maps back, not the one after it: that one may lie past the end
+            # or be a space that stands for a run of whitespace.
+            found.append((places[start], places[end - 1] + 1))
+            if len(found) == MAX_FINDINGS_PER_SEGMENT:
                 break
-            found.append(best)
-            position = best[1]
+            last_end = end
         return found
+
+    def _occurrence_end(self, text: str, start: int) -> int | None:
+        """Where the occurrence that starts at ``start`` of ``text`` ends, if one starts there.
+
+        Forms are tried longest first, and the first one that matches is the occurrence. A plain
+        form matches where no letter or digit follows it; a ``*`` form matches anyway and runs
+        on over the letters and digits that follow it.
+        """
+        for prefix_length in self._prefix_lengths:
+            for length, forms in self._index.get(text[start : start + prefix_length], ()):
+                end = start + length
+                starred = forms.get(text[start:end])
+                if starred is None:
+                    continue
+                if starred:
+                    while _in_word(text, end):
+                        end += 1
+                    return end
+                if not _in_word(text, end):
+                    return end
+        return None

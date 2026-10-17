@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal
+from functools import cached_property
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, ConfigDict, Field, StringConstraints, model_validator
 
 from donkit_guard.context import FrozenModel
 from donkit_guard.findings import ENFORCEABLE_CLASSES, FindingClass
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # Limits per policy document.
 MAX_DETECTORS = 20
@@ -113,7 +117,31 @@ class EntityMapping(FrozenModel):
     subtype: Subtype
 
 
-class PatternDetectorSpec(FrozenModel):
+class _Declaration(FrozenModel):
+    """What every kind of declaration has: the digest that tells its versions apart."""
+
+    @cached_property
+    def digest(self) -> str:
+        """A short digest of the declaration: any edit to it changes the digest.
+
+        It is computed once per instance and kept, since the engine needs it for every
+        declaration of a document on every evaluation.
+        """
+        canonical = json.dumps(
+            self.model_dump(mode="json", by_alias=True), sort_keys=True, ensure_ascii=False
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        copied = super().model_copy(update=update, deep=deep)
+        if update:
+            # An edited copy declares something other than the original, whose kept digest it
+            # would otherwise carry along.
+            copied.__dict__.pop("digest", None)
+        return copied
+
+
+class PatternDetectorSpec(_Declaration):
     """Finds text with RE2 patterns, verified and weighed by what surrounds it.
 
     ``patterns`` are RE2 expressions (no lookaround, no backreferences) tried as alternatives.
@@ -154,7 +182,7 @@ class PatternDetectorSpec(FrozenModel):
         return self
 
 
-class TermsDetectorSpec(FrozenModel):
+class TermsDetectorSpec(_Declaration):
     """Finds the words of a list, whatever their case and Latin/Cyrillic look-alike letters.
 
     A term matches whole words only; a trailing ``*`` lets it stand for any ending of its
@@ -173,7 +201,7 @@ class TermsDetectorSpec(FrozenModel):
     examples: DetectorExamples = Field(default_factory=DetectorExamples)
 
 
-class RemoteDetectorSpec(FrozenModel):
+class RemoteDetectorSpec(_Declaration):
     """Delegates detection to a service that speaks the analyze contract.
 
     ``entities`` maps each entity type the service reports to the class and subtype of the
@@ -202,7 +230,4 @@ DetectorSpec = Annotated[
 
 def spec_digest(spec: DetectorSpec) -> str:
     """A short digest of a declaration: any edit to it changes the digest."""
-    canonical = json.dumps(
-        spec.model_dump(mode="json", by_alias=True), sort_keys=True, ensure_ascii=False
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    return spec.digest

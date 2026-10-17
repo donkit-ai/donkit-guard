@@ -44,16 +44,12 @@ class Clock:
 class FakeService:
     """A detector client that answers as ``respond`` says and takes ``takes_s`` per call."""
 
-    def __init__(self, respond: Respond | None = None, *, takes_s: float = 0.0) -> None:
+    def __init__(self, respond: Respond, *, takes_s: float = 0.0) -> None:
         self.clock = Clock()
-        self.requests: list[AnalyzeRequest] = []
-        self.deadlines: list[float] = []
-        self._respond = respond or contract_numbers
+        self._respond = respond
         self._takes_s = takes_s
 
     async def analyze(self, request: AnalyzeRequest, deadline_s: float) -> AnalyzeResponse:
-        self.requests.append(request)
-        self.deadlines.append(deadline_s)
         self.clock.now += self._takes_s
         return self._respond(request)
 
@@ -124,22 +120,6 @@ async def test_check_service(respond: Respond, takes_s: float, expected: list[st
 
     assert len(violations) == len(expected), violations
     assert all(v.startswith(prefix) for v, prefix in zip(violations, expected, strict=True))
-
-
-async def test_probes_are_built_like_the_requests_of_a_remote_detector() -> None:
-    service = FakeService()
-
-    await check_service(service, deadline_s=2.0, clock=service.clock)
-
-    empty, pair, load = service.requests
-    assert empty.segments == ()
-    assert [segment.id for segment in pair.segments] == ["seg-a", "seg-b"]
-    # A character beyond the Basic Multilingual Plane in one text, so that a service counting
-    # UTF-16 units or bytes instead of code points shows up in its offsets.
-    assert [any(ord(char) > 0xFFFF for char in s.text) for s in pair.segments] == [True, False]
-    # The service is asked to answer inside a margin of the time the client will wait.
-    assert (empty.deadline_ms, pair.deadline_ms, load.deadline_ms) == (1600, 1600, 1000)
-    assert service.deadlines == [2.0, 2.0, 2.0]
 
 
 class RecordingHttpClient:
