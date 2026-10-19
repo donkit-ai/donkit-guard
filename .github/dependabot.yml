@@ -2,6 +2,9 @@ version: 2
 updates:
   - package-ecosystem: pip
     directory: /
+    # A library's dependency ranges are what its users install against: a range moves only
+    # when a new version falls outside it, and the lock file takes every other update.
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: weekly
     groups:

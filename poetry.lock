@@ -1150,4 +1150,4 @@ re2 = ["google-re2"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "e4b3837f9078611b7242a238bad25f874071f529f29005d1b50733f13d197338"
+content-hash = "edab4126da656295c355a444977cad8cc8b9d5bca7d5f60496a292867f2d13e8"
