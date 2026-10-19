@@ -79,7 +79,8 @@ def _index(terms: Sequence[str]) -> dict[str, _Forms]:
         forms[form] = forms.get(form, False) or starred
     return {
         prefix: _Forms(
-            shared=os.path.commonprefix([form for forms in by_length.values() for form in forms]),
+            # The forms are text, not paths: their common prefix is meant character by character.
+            shared=os.path.commonprefix([form for forms in by_length.values() for form in forms]),  # noqa: RUF071
             by_length=tuple(
                 (length, by_length[length]) for length in sorted(by_length, reverse=True)
             ),

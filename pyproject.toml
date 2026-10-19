@@ -41,8 +41,8 @@ packages = [{ include = "donkit_guard", from = "src" }]
 pytest = "^9.1"
 pytest-asyncio = "^1.4"
 pytest-cov = ">=6.0"
-ruff = "^0.16"
-mypy = "^2.3"
+ruff = "^0.17"
+mypy = "^2.4"
 types-pyyaml = "^6.0"
 pip-licenses = "^5.5"
 
