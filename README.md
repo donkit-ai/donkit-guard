@@ -11,11 +11,24 @@ The core is runtime-agnostic. It does not assume any particular identity or tena
 Two deployment modes share one policy core, so behaviour never diverges:
 
 - **Embedded** in an agent runtime (the reference integration is the [Donkit](https://donkit.ai) platform): hooks before the model call, before tool execution and on tool results, covering built-in tools, MCP servers and delegated sub-agents.
-- **Standalone / self-hosted**: an OpenAI-compatible gateway for LLM traffic plus a documented MCP proxy, with its own authentication, a minimal admin API for pending approvals, and audit. No Donkit account, no external security API, no telemetry.
+- **Standalone / self-hosted**: [agentgateway](https://github.com/agentgateway/agentgateway) in front of your application asks the `guard-standalone` service about every LLM request and response and every MCP tool call, with client authentication at the gateway, an admin API for pending approvals, and an audit trail in SQLite or PostgreSQL. No Donkit account, no external security API, no telemetry.
+
+Both modes run the same `donkit_guard` package and the same policy documents: `examples/policies/standalone.yaml` decides alike embedded in a host and behind the gateway.
 
 ## Status
 
-Alpha, core under construction. The first tagged pre-release (`v0.1.0a1`) contains the policy engine, the segment payload model, the secrets, checksum-PII, NER-PII and injection detectors, masking, asynchronous approvals, audit models and the in-memory adapters, plus the `guard-pii` service image. `v0.1.0a4` adds detectors declared in policy documents and background checks for detectors that only feed audit rules. See [CHANGELOG.md](CHANGELOG.md).
+Alpha, core under construction. The first tagged pre-release (`v0.1.0a1`) contains the policy engine, the segment payload model, the secrets, checksum-PII, NER-PII and injection detectors, masking, asynchronous approvals, audit models and the in-memory adapters, plus the `guard-pii` service image. `v0.1.0a4` adds detectors declared in policy documents and background checks for detectors that only feed audit rules. `v0.1.0a5` adds the standalone service and its agentgateway integration. See [CHANGELOG.md](CHANGELOG.md).
+
+## Standalone
+
+```bash
+export GUARD_ADMIN_TOKEN=$(openssl rand -hex 24)
+export GUARD_API_KEYS='[{"sha256": "<sha256 of a client key>", "tenant": "default"}]'
+mkdir -p deploy/agentgateway/secrets && printf %s "$OPENAI_API_KEY" > deploy/agentgateway/secrets/llm-api-key
+docker compose up -d
+```
+
+Point an OpenAI-compatible client at `http://localhost:3000` and MCP clients at `http://localhost:3000/mcp`. Secrets in prompts are refused before they reach the model, personal data is masked in place (tool calls and tool definitions stay intact), streamed answers are released in checked windows and closed when one carries a secret, destructive MCP tools are refused, and writes wait for the user's approval through the admin API. See [docs/standalone.md](docs/standalone.md).
 
 ## What it will provide
 
@@ -37,7 +50,7 @@ Donkit Guard protects the traffic that passes through it. It is not a replacemen
 
 ## Optional extras
 
-The base install needs only `pydantic` and `pyyaml`. Two features use optional packages: declared pattern detectors need `pip install 'donkit-guard[re2]'` (declared word lists need no extra), and declared remote detectors and the HTTP client for the analyze contract need `pip install 'donkit-guard[http]'`. A feature whose extra is missing fails when it is used, with an error that names the extra.
+The base install needs only `pydantic` and `pyyaml`. The standalone service is the `standalone` extra (`pip install 'donkit-guard[standalone]'`, then `guard-standalone`); the image `ghcr.io/donkit-ai/guard-standalone` carries it. Two features of the core use optional packages: declared pattern detectors need `pip install 'donkit-guard[re2]'` (declared word lists need no extra), and declared remote detectors and the HTTP client for the analyze contract need `pip install 'donkit-guard[http]'`. A feature whose extra is missing fails when it is used, with an error that names the extra.
 
 ## Development
 

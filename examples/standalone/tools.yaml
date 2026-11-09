@@ -1,0 +1,23 @@
+# What the guard knows about the tools behind the gateway (GUARD_TOOL_CATALOG_FILE).
+# A tool without an entry keeps the conservative default: an unknown effect, gated as a write,
+# with every argument part of the approval and none masked.
+tools:
+  - tool: search_docs
+    effect: read
+    effect_source: operator
+    # A secret pasted into a search is replaced by a placeholder; the search still runs.
+    maskable_args: ["/query"]
+  - tool: send_email
+    effect: egress
+    effect_source: operator
+    # The approval binds to the recipient and the subject; a changed body does not need a new one.
+    essential_args: ["/to", "/subject"]
+    # Findings in the body are replaced by placeholders before the tool receives it.
+    maskable_args: ["/body"]
+  - tool: create_ticket
+    effect: write
+    effect_source: operator
+    maskable_args: ["/description"]
+  - tool: read_config
+    effect: read
+    effect_source: operator

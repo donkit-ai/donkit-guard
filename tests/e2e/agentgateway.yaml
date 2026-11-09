@@ -1,0 +1,61 @@
+# The gateway of the end-to-end stack: deploy/agentgateway/config.yaml with the stub model and
+# MCP server as upstreams and a fixed test key. Keep the two in step.
+config:
+  statsAddr: 127.0.0.1:15020
+  readinessAddr: 127.0.0.1:15021
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - name: mcp
+      matches:
+      - path:
+          pathPrefix: /mcp
+      policies:
+        apiKey:
+          mode: strict
+          keys:
+          - keyHash: "sha256:118487f01138dc3ddaaf92bc1f0840cc926274ff8728a59a17664ecd922077f3"
+            metadata:
+              tenant: acme
+        mcpGuardrails:
+          processors:
+          - kind: remote
+            host: guard-standalone:9090
+            failureMode: failClosed
+            methods:
+              "tools/call": full
+            metadata:
+              tenant: apiKey.tenant
+            requestHeaders:
+              allowed: [x-guard-principal, x-guard-principal-kind, x-guard-approver, x-guard-run, x-guard-agent, mcp-session-id]
+      backends:
+      - mcp:
+          targets:
+          - name: tickets
+            mcp:
+              host: http://mcp-stub:8001/mcp
+    - name: llm
+      policies:
+        apiKey:
+          mode: strict
+          keys:
+          - keyHash: "sha256:118487f01138dc3ddaaf92bc1f0840cc926274ff8728a59a17664ecd922077f3"
+            metadata:
+              tenant: acme
+        extProc:
+          host: guard-standalone:9090
+          failureMode: failClosed
+          requestAttributes:
+            tenant: apiKey.tenant
+          processingOptions:
+            requestHeaderMode: send
+            requestBodyMode: buffered
+            responseHeaderMode: send
+            responseBodyMode: fullDuplexStreamed
+      backends:
+      - ai:
+          name: stub
+          hostOverride: upstream:8000
+          provider:
+            openAI: {}

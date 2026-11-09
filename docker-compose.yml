@@ -1,0 +1,87 @@
+# Donkit Guard standalone: agentgateway in front, guard-standalone and guard-pii behind it.
+#
+#   export GUARD_ADMIN_TOKEN=$(openssl rand -hex 24)
+#   export GUARD_API_KEYS='[{"sha256": "<sha256 of a client key>", "tenant": "default"}]'
+#   mkdir -p deploy/agentgateway/secrets && printf %s "$OPENAI_API_KEY" > deploy/agentgateway/secrets/llm-api-key
+#   docker compose up -d
+#
+# PostgreSQL instead of SQLite:
+#   GUARD_DB_URL=postgresql+asyncpg://guard:guard@postgres:5432/guard docker compose --profile postgres up -d
+#
+# See docs/standalone.md. Only the gateway has a route out (to the LLM provider and the MCP
+# servers it is configured with); guard-standalone, guard-pii and postgres sit on an internal
+# network and cannot open a connection to the outside.
+name: donkit-guard
+
+services:
+  guard-standalone:
+    image: ghcr.io/donkit-ai/guard-standalone:${GUARD_VERSION:-0.1.0a5}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.standalone
+    environment:
+      GUARD_POLICY_FILE: /etc/guard/policy.yaml
+      GUARD_TOOL_CATALOG_FILE: /etc/guard/tools.yaml
+      GUARD_PII_URL: http://guard-pii:8080
+      GUARD_DB_URL: ${GUARD_DB_URL:-sqlite+aiosqlite:////data/guard.db}
+      GUARD_API_KEYS: ${GUARD_API_KEYS:?set GUARD_API_KEYS, see docs/standalone.md}
+      GUARD_ADMIN_TOKEN: ${GUARD_ADMIN_TOKEN:?set GUARD_ADMIN_TOKEN, see docs/standalone.md}
+    volumes:
+      - ./examples/policies/standalone.yaml:/etc/guard/policy.yaml:ro
+      - ./examples/standalone/tools.yaml:/etc/guard/tools.yaml:ro
+      - guard-data:/data
+    depends_on:
+      guard-pii: {condition: service_healthy}
+      postgres: {condition: service_healthy, required: false}
+    networks: [guard]
+    restart: unless-stopped
+
+  guard-pii:
+    image: ghcr.io/donkit-ai/guard-pii:${GUARD_VERSION:-0.1.0a5}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.pii
+    networks: [guard]
+    restart: unless-stopped
+
+  agentgateway:
+    image: ghcr.io/agentgateway/agentgateway:v1.5.0
+    command: ["-f", "/etc/agentgateway/config.yaml"]
+    volumes:
+      - ./deploy/agentgateway/config.yaml:/etc/agentgateway/config.yaml:ro
+      - ./deploy/agentgateway/secrets:/etc/agentgateway/secrets:ro
+    ports:
+      # Bound to this machine; put TLS in front before exposing it further.
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      guard-standalone: {condition: service_healthy}
+    networks: [guard, edge]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    profiles: [postgres]
+    environment:
+      POSTGRES_DB: guard
+      POSTGRES_USER: guard
+      # Reachable only on the internal network; set your own for anything beyond a trial.
+      POSTGRES_PASSWORD: ${GUARD_POSTGRES_PASSWORD:-guard}
+    volumes:
+      - guard-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guard -d guard"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [guard]
+    restart: unless-stopped
+
+networks:
+  guard:
+    internal: true
+  edge: {}
+
+volumes:
+  guard-data: {}
+  guard-postgres: {}

@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a5] - 2026-11-09
+
+### Added
+
+- The standalone service `guard-standalone` (`pip install 'donkit-guard[standalone]'`, image `ghcr.io/donkit-ai/guard-standalone`, `docker/Dockerfile.standalone`): the guard with its policy read from `GUARD_POLICY_FILE` and reloaded when the file changes (a file that does not load is refused and the active version stays, logged, shown by the admin API and counted), the secrets, checksum-PII and injection detectors in process and NER through guard-pii (`GUARD_PII_URL`, or `GUARD_PII_DISABLED=true`), and decisions, approvals and policy versions in SQLite or PostgreSQL through SQLAlchemy, with Alembic migrations applied at start. Approvals are stored with compare-and-set transitions, so a decision and a use each happen once whatever races them, and pending approvals past their TTL are swept.
+- An HTTP API: `POST /v1/authorize` and `POST /v1/executions` for clients with an `X-API-Key` (SHA-256 digests in `GUARD_API_KEYS`, each bound to a tenant), and under `GUARD_ADMIN_TOKEN` `GET /admin/approvals`, `POST /admin/approvals/{id}/decide` (answered only by the principal the approval was asked of), `GET /admin/decisions` (filtered by tenant, run and agent, paged by a keyset cursor), `GET /admin/policy` and `POST /admin/policy/reload`; `/healthz`, `/readyz` (the policy, the database and guard-pii) and `/metrics`. Bodies are capped (`GUARD_MAX_BODY_BYTES`).
+- agentgateway integration over gRPC: an Envoy ext_proc server for the LLM route, which reads OpenAI-compatible chat completions (messages, tool calls in the history, tool results and tool definitions), masks findings at their JSON pointers with a matching `content-length`, refuses with an OpenAI-style `guardrail_blocked` error, and checks responses whole or, streamed with `fullDuplexStreamed`, in windows of 1024 characters with a 256-character overlap, closing the stream with one error event when a window is refused; and an ExtMcp server for the MCP route, which refuses a `tools/call` with JSON-RPC error `-32001`, answers `approval_pending` with the approval id for a call to repeat after the user approved it, masks maskable arguments in place and checks tool results. The tenant comes from what the gateway attaches after authenticating the caller; the principal, run and agent from `x-guard-*` headers. The protocol definitions are agentgateway v1.5.0's; `scripts/gen_protos.py` generates the stubs, and CI checks them.
+- A tool catalog (`GUARD_TOOL_CATALOG_FILE`) of action descriptors: each tool's effect, the arguments an approval binds to and the arguments that may be masked.
+- `docker-compose.yml` with agentgateway, guard-standalone, guard-pii and a `postgres` profile, the guard behind an internal network without a route out; `deploy/agentgateway/config.yaml` with API-key authentication, ext_proc and mcpGuardrails failing closed, loopback-only stats and readiness, and a JWT example for an identity provider.
+- `examples/policies/standalone.yaml` and `examples/standalone/tools.yaml`; the core decides on the policy as the service does (`tests/test_standalone_policy.py`).
+- An end-to-end suite of the stack on a network without a route out (`tests/e2e`, workflow `standalone-e2e`).
+- Documentation: `docs/standalone.md`, the standalone part of `docs/threat-model.md`.
+
+### Changed
+
+- The release workflow publishes the standalone image as `guard-standalone`.
+
 ## [0.1.0a4] - 2026-10-17
 
 ### Added
@@ -66,7 +83,8 @@ All notable changes to this project are documented here. The format follows
 - `guard-pii` service (`services/pii`, `docker/Dockerfile.pii`): Presidio + spaCy ru/en models + tuned Russian recognizers, per-entity thresholds, a bounded analysis pool, an analyzer failure reported to the core as a detector failure, a non-root image, offline by construction.
 - Documentation: architecture, policy reference, example strict policy, third-party notices.
 
-[Unreleased]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a4...HEAD
+[Unreleased]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a5...HEAD
+[0.1.0a5]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a4...v0.1.0a5
 [0.1.0a4]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a3...v0.1.0a4
 [0.1.0a3]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a2...v0.1.0a3
 [0.1.0a2]: https://github.com/donkit-ai/donkit-guard/compare/v0.1.0a1...v0.1.0a2

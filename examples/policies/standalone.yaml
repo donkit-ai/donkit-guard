@@ -1,0 +1,86 @@
+# The policy of the standalone quick start (docker-compose.yml mounts it as /etc/guard/policy.yaml).
+# The same document decides embedded in a host: tests/test_standalone_policy.py runs it through
+# the core alone and expects what the standalone service answers.
+schema_version: 1
+version: "standalone-1"
+mode: enforce
+unsupported_content: uninspected
+approval_ttl_s: 600
+segment_limit_bytes: 262144
+layers:
+  - name: standalone
+    rules:
+      - id: secrets-deny-external-llm
+        description: A secret in a prompt to a model outside the organization stops the request
+        match:
+          action_kind: [llm_request]
+          destination_trust: [tenant, unknown]
+          finding_class: [secret]
+          min_score: 0.5
+        action: deny
+        hard: true
+        reason: "A secret must not reach a model outside the organization"
+      - id: secrets-mask
+        description: Secrets anywhere else (tool arguments and results, model output) are masked
+        match:
+          finding_class: [secret]
+          min_score: 0.5
+        action: mask
+        reason: "A secret was found in the payload"
+      - id: secrets-audit
+        match:
+          finding_class: [secret]
+        action: audit
+        reason: "A secret-like token was found in the payload"
+      - id: pii-mask-external-llm
+        description: Personal data is masked before it reaches a model outside the organization
+        match:
+          action_kind: [llm_request]
+          destination_trust: [tenant, unknown]
+          finding_class: [pii]
+          min_score: 0.5
+        action: mask
+        reason: "Personal data must not reach a model outside the organization"
+      - id: pii-audit
+        match:
+          finding_class: [pii]
+        action: audit
+        reason: "Personal data was found in the payload"
+      - id: injection-audit
+        match:
+          finding_class: [injection]
+        action: audit
+        reason: "Instruction-like content was detected"
+      - id: tools-destructive-deny
+        description: Tools that delete or drop are never run through the guard
+        match:
+          action_kind: [tool_call]
+          tool: ["delete_*", "drop_*"]
+        action: deny
+        hard: true
+        reason: "Destructive tools are disabled by policy"
+      - id: tool-read-allow
+        match:
+          action_kind: [tool_call]
+          effect: [read]
+        action: allow
+      - id: tool-execute-allow
+        match:
+          action_kind: [tool_call]
+          effect: [execute]
+        action: allow
+      - id: tool-side-effect-approval
+        description: Writes, spending and egress need the user's confirmation; an undeclared effect is gated as a write
+        match:
+          action_kind: [tool_call]
+          effect: [write, spend, egress]
+        action: require_approval
+        reason: "This tool call has a side effect that requires confirmation"
+      - id: llm-allow
+        match:
+          action_kind: [llm_request]
+        action: allow
+      - id: tool-result-allow
+        match:
+          action_kind: [tool_result]
+        action: allow

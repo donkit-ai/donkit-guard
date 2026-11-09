@@ -1,0 +1,59 @@
+# The end-to-end stack of the standalone service: no network route out of it.
+#
+#   docker compose -f tests/e2e/compose.yaml up --build --abort-on-container-exit --exit-code-from runner
+#
+# guard-pii is left out (its models need 1.7 GB of memory); the checksum PII detector, which runs
+# inside guard-standalone, finds the e-mail address the tests send.
+name: guard-e2e
+
+x-e2e-secrets: &e2e-env
+  E2E_API_KEY: e2e-acme-key
+  E2E_ADMIN_TOKEN: e2e-admin-token-not-secret
+
+services:
+  guard-standalone:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.standalone
+    environment:
+      GUARD_PII_DISABLED: "true"
+      GUARD_TOOL_CATALOG_FILE: /etc/guard/tools.yaml
+      # sha256("e2e-acme-key"); the gateway authenticates the same key.
+      GUARD_API_KEYS: '[{"sha256": "118487f01138dc3ddaaf92bc1f0840cc926274ff8728a59a17664ecd922077f3", "tenant": "acme"}]'
+      GUARD_ADMIN_TOKEN: e2e-admin-token-not-secret
+    volumes:
+      - ../../examples/policies/standalone.yaml:/etc/guard/policy.yaml:ro
+      - ../../examples/standalone/tools.yaml:/etc/guard/tools.yaml:ro
+    networks: [sealed]
+
+  agentgateway:
+    image: ghcr.io/agentgateway/agentgateway:v1.5.0
+    command: ["-f", "/etc/agentgateway/config.yaml"]
+    volumes:
+      - ./agentgateway.yaml:/etc/agentgateway/config.yaml:ro
+    depends_on:
+      guard-standalone: {condition: service_healthy}
+    networks: [sealed]
+
+  upstream:
+    build: {context: ., dockerfile: Dockerfile.stubs}
+    command: ["uvicorn", "stubs.upstream:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks: [sealed]
+
+  mcp-stub:
+    build: {context: ., dockerfile: Dockerfile.stubs}
+    command: ["python", "-m", "stubs.mcp_server"]
+    networks: [sealed]
+
+  runner:
+    build: {context: ., dockerfile: Dockerfile.stubs}
+    command: ["sh", "-c", "sleep 3 && pytest -q -p no:cacheprovider -o asyncio_mode=auto test_gateway_e2e.py"]
+    environment:
+      <<: *e2e-env
+      E2E_GATEWAY_URL: http://agentgateway:3000
+    depends_on: [agentgateway, upstream, mcp-stub]
+    networks: [sealed]
+
+networks:
+  sealed:
+    internal: true

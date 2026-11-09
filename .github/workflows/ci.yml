@@ -34,6 +34,8 @@ jobs:
         run: poetry run mypy
       - name: Contract (generated file up to date)
         run: poetry run python scripts/gen_contract.py --check
+      - name: Gateway protocol stubs (generated files up to date)
+        run: poetry run python scripts/gen_protos.py --check
 
   test:
     name: tests (py${{ matrix.python }})

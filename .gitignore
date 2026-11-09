@@ -16,3 +16,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Provider keys the gateway reads (docker-compose.yml).
+deploy/agentgateway/secrets/
