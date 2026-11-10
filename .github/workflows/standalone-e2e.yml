@@ -43,8 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Validate the shipped gateway configuration
+        # The gateway reads the provider key file while validating; a placeholder stands in for it.
         run: |
+          mkdir -p "$RUNNER_TEMP/secrets" && printf %s placeholder > "$RUNNER_TEMP/secrets/llm-api-key"
           docker run --rm -v "$PWD/deploy/agentgateway/config.yaml:/c.yaml:ro" \
+            -v "$RUNNER_TEMP/secrets:/etc/agentgateway/secrets:ro" \
             ghcr.io/agentgateway/agentgateway:v1.5.0 -f /c.yaml --validate-only
       - name: Run the stack
         run: |
