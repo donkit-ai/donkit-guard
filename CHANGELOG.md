@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format follows
 
 - The release workflow publishes the standalone image as `guard-standalone`.
 
+### Security
+
+- `certifi` 2026.10.23: drops the emSign root CAs whose intermediate keys were compromised.
+
 ## [0.1.0a4] - 2026-10-17
 
 ### Added
