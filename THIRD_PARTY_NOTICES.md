@@ -11,6 +11,15 @@ built from it.
 | gitleaks rule set | `src/donkit_guard/detectors/data/gitleaks.toml`, the regular expressions and keywords of the secret rules (unmodified data file, converted at import time) | MIT, Copyright (c) 2019 Zachary Rice — `src/donkit_guard/detectors/data/LICENSE.gitleaks` | https://github.com/gitleaks/gitleaks |
 | Yelp detect-secrets | seven regular expressions in `src/donkit_guard/detectors/data/extra_patterns.json` derived from the `BasicAuthDetector`, `AzureStorageKeyDetector`, `DiscordBotTokenDetector`, `SquareOAuthDetector`, `TwilioKeyDetector`, `TelegramBotTokenDetector` and `MailchimpDetector` plugins | Apache License 2.0, Copyright Yelp, Inc. | https://github.com/Yelp/detect-secrets |
 
+## Included in the `guard-standalone` service
+
+| Component | What is used | Licence | Source |
+| --- | --- | --- | --- |
+| agentgateway protocol definitions | `services/standalone/donkit_guard_standalone/proto/ext_mcp.proto`, `ext_proc.proto` and `shared_envoy.proto` from agentgateway v1.5.0 (`crates/protos/proto`), unmodified, and the Python modules generated from them | Apache License 2.0, Copyright The agentgateway Authors; `ext_proc.proto` and `shared_envoy.proto` are derived from Envoy's API definitions, Apache License 2.0, Copyright Envoy Project Authors | https://github.com/agentgateway/agentgateway, https://github.com/envoyproxy/envoy |
+
+The compose files run the agentgateway image (`ghcr.io/agentgateway/agentgateway`, Apache License 2.0) as
+published by its authors; it is not built or redistributed from this repository.
+
 ## Included in the `guard-pii` image (not in the package)
 
 | Component | Licence | Source |

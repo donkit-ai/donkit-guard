@@ -1,0 +1,61 @@
+# Builds guard-standalone and runs the gateway end-to-end tests in a compose network with no
+# route out. Path-filtered, so it does not run on every pull request and must stay out of the
+# required checks: a check that never starts blocks a merge.
+name: standalone-e2e
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "services/standalone/**"
+      - "docker/Dockerfile.standalone"
+      - "deploy/agentgateway/**"
+      - "examples/policies/standalone.yaml"
+      - "examples/standalone/**"
+      - "tests/e2e/**"
+      - "poetry.lock"
+      - ".github/workflows/standalone-e2e.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "services/standalone/**"
+      - "docker/Dockerfile.standalone"
+      - "deploy/agentgateway/**"
+      - "examples/policies/standalone.yaml"
+      - "examples/standalone/**"
+      - "tests/e2e/**"
+      - "poetry.lock"
+      - ".github/workflows/standalone-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standalone-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: gateway end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate the shipped gateway configuration
+        # The gateway reads the provider key file while validating; a placeholder stands in for it.
+        run: |
+          mkdir -p "$RUNNER_TEMP/secrets" && printf %s placeholder > "$RUNNER_TEMP/secrets/llm-api-key"
+          docker run --rm -v "$PWD/deploy/agentgateway/config.yaml:/c.yaml:ro" \
+            -v "$RUNNER_TEMP/secrets:/etc/agentgateway/secrets:ro" \
+            ghcr.io/agentgateway/agentgateway:v1.5.0 -f /c.yaml --validate-only
+      - name: Run the stack
+        run: |
+          docker compose -f tests/e2e/compose.yaml up --build \
+            --abort-on-container-exit --exit-code-from runner
+      - name: Logs
+        if: failure()
+        run: docker compose -f tests/e2e/compose.yaml logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose -f tests/e2e/compose.yaml down -v

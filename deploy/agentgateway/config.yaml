@@ -1,0 +1,103 @@
+# agentgateway in front of guard-standalone (docker-compose.yml mounts this file).
+#
+#   :3000  client traffic. /mcp goes to your MCP servers, every other path to the LLM provider.
+#          Both routes authenticate the client, then ask guard-standalone before anything is
+#          forwarded: ext_proc for the LLM route, ExtMcp (mcpGuardrails) for tools/call.
+#   :8080  the guard's own HTTP API (/v1/authorize, /admin/...), for the operator's backend.
+#
+# guard-standalone sits on an internal network and is reached only through this gateway.
+# The stats and readiness servers listen on the container's loopback only.
+#
+# Change before use:
+#   1. the client key hashes under `apiKey.keys` (`printf %s <key> | sha256sum`), and the tenant
+#      each key belongs to; the guard trusts the tenant this file attaches, never one a client sends;
+#   2. the LLM provider and the file holding its key (deploy/agentgateway/secrets/llm-api-key);
+#   3. the MCP targets.
+config:
+  statsAddr: 127.0.0.1:15020
+  readinessAddr: 127.0.0.1:15021
+  adminAddr: "off"
+
+binds:
+- port: 3000
+  listeners:
+  - routes:
+    - name: mcp
+      matches:
+      - path:
+          pathPrefix: /mcp
+      policies:
+        apiKey:
+          mode: strict
+          keys:
+          # Quick-start key "guard-quickstart-key-change-me". Replace it.
+          - keyHash: "sha256:cb4effb9fcce50c545cbce77a29448f51347f4d8da4cd10b088c96bfc3c52895"
+            metadata:
+              tenant: default
+        mcpGuardrails:
+          processors:
+          - kind: remote
+            host: guard-standalone:9090
+            failureMode: failClosed
+            methods:
+              "tools/call": full
+            metadata:
+              tenant: apiKey.tenant
+            # The application names the person and conversation it acts for; see docs/standalone.md.
+            requestHeaders:
+              allowed: [x-guard-principal, x-guard-principal-kind, x-guard-approver, x-guard-run, x-guard-agent, mcp-session-id]
+      backends:
+      - mcp:
+          targets:
+          - name: tools
+            mcp:
+              host: http://mcp-server:8000/mcp
+
+    - name: llm
+      policies:
+        apiKey:
+          mode: strict
+          keys:
+          - keyHash: "sha256:cb4effb9fcce50c545cbce77a29448f51347f4d8da4cd10b088c96bfc3c52895"
+            metadata:
+              tenant: default
+        extProc:
+          host: guard-standalone:9090
+          failureMode: failClosed
+          requestAttributes:
+            tenant: apiKey.tenant
+          processingOptions:
+            requestHeaderMode: send
+            requestBodyMode: buffered
+            responseHeaderMode: send
+            # Streams stay streams: the guard releases them window by window once checked.
+            responseBodyMode: fullDuplexStreamed
+        # The provider key the gateway sends upstream; clients never hold it.
+        backendAuth:
+          key:
+            value:
+              file: /etc/agentgateway/secrets/llm-api-key
+      backends:
+      - ai:
+          name: openai
+          provider:
+            openAI: {}
+
+    # Corporate identity provider instead of API keys: replace `apiKey` on both routes with a
+    # JWT policy and attach the tenant from a claim (`tenant: jwt.org_id` under
+    # `requestAttributes` and `metadata`). The guard needs no change.
+    #
+    #   jwtAuth:
+    #     mode: strict
+    #     providers:
+    #     - issuer: https://idp.example.com/
+    #       audiences: [donkit-guard]
+    #       jwks:
+    #         url: https://idp.example.com/.well-known/jwks.json
+
+- port: 8080
+  listeners:
+  - routes:
+    - name: guard-api
+      backends:
+      - host: guard-standalone:8080

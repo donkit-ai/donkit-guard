@@ -1,0 +1,45 @@
+# guard-standalone: the guard service with its HTTP API (8080) and the gateway's gRPC server (9090).
+# Dependencies come from poetry.lock; nothing is downloaded at runtime.
+FROM python:3.12-slim AS build
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    POETRY_VIRTUALENVS_IN_PROJECT=true \
+    POETRY_NO_INTERACTION=1
+
+RUN pip install "poetry==2.3.2"
+
+WORKDIR /app
+COPY pyproject.toml poetry.lock README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
+COPY src ./src
+COPY services/standalone ./services/standalone
+RUN poetry install --only main --extras "standalone re2 http" --no-ansi \
+    && find /app -name '__pycache__' -prune -exec rm -rf {} +
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH \
+    GUARD_POLICY_FILE=/etc/guard/policy.yaml \
+    GUARD_DB_URL=sqlite+aiosqlite:////data/guard.db \
+    GUARD_HTTP_PORT=8080 \
+    GUARD_GRPC_PORT=9090
+
+COPY --from=build /app /app
+
+# Refuse to build an image whose service cannot be imported.
+RUN python -c "import donkit_guard_standalone.api, donkit_guard_standalone.gateway"
+
+# The service handles attacker-influenced prompts and tool arguments; it runs unprivileged and
+# writes only to /data (the SQLite database, when no GUARD_DB_URL points elsewhere).
+RUN useradd -r -u 10001 guard && mkdir -p /data /etc/guard && chown guard /data
+USER guard
+VOLUME ["/data"]
+WORKDIR /data
+
+EXPOSE 8080 9090
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import os,urllib.request,sys; port=os.environ.get('GUARD_HTTP_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=4).status == 200 else 1)"
+
+CMD ["guard-standalone"]

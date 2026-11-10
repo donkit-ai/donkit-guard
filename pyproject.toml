@@ -1,6 +1,6 @@
 [project]
 name = "donkit-guard"
-version = "0.1.0a4"
+version = "0.1.0a5"
 description = "Open-source guard for LLM traffic and AI-agent actions: secrets/PII checks before the model, policy checks before tool execution, approvals and audit."
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,6 +26,21 @@ dependencies = [
 [project.optional-dependencies]
 re2 = ["google-re2>=1.1.20251105"]
 http = ["httpx>=0.27,<1"]
+standalone = [
+  "httpx>=0.27,<1",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.32,<1",
+  "pydantic-settings>=2.6,<3",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+  "aiosqlite>=0.20,<1",
+  "asyncpg>=0.30,<1",
+  "alembic>=1.14,<2",
+  "grpcio>=1.85.1,<2",
+  "protobuf>=7.35.1,<8",
+]
+
+[project.scripts]
+guard-standalone = "donkit_guard_standalone.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/donkit-ai/donkit-guard"
@@ -35,7 +50,10 @@ Changelog = "https://github.com/donkit-ai/donkit-guard/blob/main/CHANGELOG.md"
 Security = "https://github.com/donkit-ai/donkit-guard/security/policy"
 
 [tool.poetry]
-packages = [{ include = "donkit_guard", from = "src" }]
+packages = [
+  { include = "donkit_guard", from = "src" },
+  { include = "donkit_guard_standalone", from = "services/standalone" },
+]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.1"
@@ -45,6 +63,8 @@ ruff = "^0.17"
 mypy = "^2.4"
 types-pyyaml = "^6.0"
 pip-licenses = "^5.5"
+grpcio-tools = ">=1.68"
+types-protobuf = ">=5.29"
 
 [build-system]
 requires = ["poetry-core>=2.0"]
@@ -53,19 +73,21 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "services/standalone", "tests"]
+# Generated from the gateway's .proto files by scripts/gen_protos.py.
+extend-exclude = ["services/standalone/donkit_guard_standalone/proto/*_pb2*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "TID", "TC", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["donkit_guard"]
+known-first-party = ["donkit_guard", "donkit_guard_standalone"]
 
 [tool.ruff.lint.flake8-type-checking]
 # Pydantic resolves model annotations at runtime, so a name used in a model
 # field has to stay importable outside a TYPE_CHECKING block.
-runtime-evaluated-base-classes = ["pydantic.BaseModel", "donkit_guard.context.FrozenModel"]
+runtime-evaluated-base-classes = ["pydantic.BaseModel", "pydantic_settings.BaseSettings", "donkit_guard.context.FrozenModel"]
 
 [tool.ruff.lint.per-file-ignores]
 # Detection data: Russian-language patterns and a Latin/Cyrillic confusables
@@ -79,8 +101,20 @@ python_version = "3.12"
 strict = true
 # `services` type-checks only against the guard-pii requirements (presidio, spaCy, fastapi),
 # which are installed in the image, not in the package's dev environment.
-files = ["src"]
+files = ["src", "services/standalone"]
+exclude = ["services/standalone/donkit_guard_standalone/proto/.*_pb2(_grpc)?\\.py$"]
 plugins = ["pydantic.mypy"]
+
+# grpcio ships no type information; the generated message modules come with .pyi stubs.
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*", "donkit_guard_standalone.proto.ext_proc_pb2_grpc", "donkit_guard_standalone.proto.ext_mcp_pb2_grpc", "donkit_guard_standalone.proto.shared_envoy_pb2_grpc"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# The .pyi stubs protoc writes are used for their types, not held to the strict rules.
+[[tool.mypy.overrides]]
+module = ["donkit_guard_standalone.proto.*"]
+ignore_errors = true
 
 # `re2` comes from the optional google-re2 extra, which may not be installed where mypy runs.
 [[tool.mypy.overrides]]

@@ -11,6 +11,21 @@ This document is filled in alongside the first release. It will cover:
   or tools is out of scope and must be restricted by the deployment (strict profile).
 - Fail-closed behaviour in enforce mode and the documented buffering limits for streaming.
 
+## Standalone service
+
+- **Tenant from the gateway only.** The tenant of a gateway exchange is what the gateway attaches after it
+  authenticated the caller (API key metadata or a JWT claim); the guard never reads it from the request.
+  The principal, run and agent come from `x-guard-*` headers set by the authenticated application, so they
+  are trusted exactly as far as the holder of the key; end users must not hold gateway keys.
+- **Two trust zones.** Client keys (`GUARD_API_KEYS`, stored as SHA-256 digests) reach `/v1`; the admin token
+  reaches `/admin`. Only the principal an approval was asked of can answer it, whoever holds the admin token.
+- **Fail closed.** The gateway routes use `failureMode: failClosed`; a failure inside the guard answers with
+  an error, never with the unchecked content. An LLM request the guard cannot read is refused by default.
+- **Streams.** A streamed answer is released only after each window was checked; already released text cannot
+  be recalled, and a window that needs a mask ends the stream instead.
+- **No egress.** The service, guard-pii and the database run on a network without a route out; the
+  end-to-end suite asserts it.
+
 ## Declared detectors from policy documents
 
 A policy document can declare its own detectors ([detectors.md](detectors.md#declared-detectors)), and a host

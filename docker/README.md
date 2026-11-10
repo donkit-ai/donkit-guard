@@ -32,6 +32,18 @@ build time and the tldextract cache is warmed during the build. Run with
 `--network none` to verify; `.github/workflows/pii-image.yml` builds the image and probes it
 that way on every change to the service.
 
-## `Dockerfile.standalone` — `guard`
+## `Dockerfile.standalone` — `guard-standalone`
 
-Added with the standalone milestone.
+The standalone service: the HTTP API on 8080 and the gRPC server agentgateway calls on 9090
+(ext_proc for the LLM route, ExtMcp for the MCP route). Dependencies are installed from
+`poetry.lock`; nothing is downloaded at runtime.
+
+Build from the repository root:
+
+    docker build -f docker/Dockerfile.standalone -t guard-standalone:dev .
+
+It needs a policy file at `/etc/guard/policy.yaml` (or `GUARD_POLICY_FILE`), `GUARD_API_KEYS`,
+`GUARD_ADMIN_TOKEN`, and either `GUARD_PII_URL` or `GUARD_PII_DISABLED=true`; the SQLite database
+lives on the `/data` volume unless `GUARD_DB_URL` points elsewhere. The service runs as the
+unprivileged user `guard` (uid 10001). `docker-compose.yml` in the repository root runs it with
+guard-pii and agentgateway; see [docs/standalone.md](../docs/standalone.md).
